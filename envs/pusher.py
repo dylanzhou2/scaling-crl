@@ -11,7 +11,8 @@ from jax import numpy as jp
 
 
 class Pusher(PipelineEnv):
-  def __init__(self, backend='generalized', kind="easy", **kwargs):
+
+  def __init__(self, backend='generalized', kind='easy', **kwargs):
     path = epath.resource_path('brax') / 'envs/assets/pusher.xml'
     sys = mjcf.load(path)
 
@@ -19,7 +20,7 @@ class Pusher(PipelineEnv):
 
     if backend in ['spring', 'positional']:
       sys = sys.tree_replace(dt=0.001)
-    
+
       sys = sys.replace(
           actuator=sys.actuator.replace(gear=jp.array([20.0] * sys.act_size()))
       )
@@ -35,7 +36,7 @@ class Pusher(PipelineEnv):
     self._object_idx = self.sys.link_names.index('object')
     self._goal_idx = self.sys.link_names.index('goal')
     self.kind = kind
-    
+
     self.state_dim = 20
     self.goal_indices = jp.array([10, 11, 12])
 
@@ -51,12 +52,12 @@ class Pusher(PipelineEnv):
     ])
 
     # randomly place the goal depending on env kind
-    if self.kind == "hard":
+    if self.kind == 'hard':
       goal_pos = jp.concatenate([
           jax.random.uniform(rng2, (1,), minval=-0.65, maxval=0.35),
           jax.random.uniform(rng3, (1,), minval=-0.55, maxval=0.45),
       ])
-    elif self.kind == "easy":
+    elif self.kind == 'easy':
       goal_pos = jp.concatenate([
           jax.random.uniform(rng2, (1,), minval=-0.3, maxval=-1e-6) - 0.25,
           jax.random.uniform(rng3, (1,), minval=-0.2, maxval=0.2),
@@ -78,14 +79,14 @@ class Pusher(PipelineEnv):
     obs = self._get_obs(pipeline_state)
     reward, done, zero = jp.zeros(3)
     metrics = {
-      'reward_dist': zero, 
-      'reward_ctrl': zero, 
-      'reward_near': zero,
-      'success': zero,
-      'success_hard': zero,
+        'reward_dist': zero,
+        'reward_ctrl': zero,
+        'reward_near': zero,
+        'success': zero,
+        'success_hard': zero,
     }
 
-    info = {"seed": 0}
+    info = {'seed': 0}
     state = State(pipeline_state, obs, reward, done, metrics)
     state.info.update(info)
 
@@ -108,12 +109,12 @@ class Pusher(PipelineEnv):
 
     pipeline_state = self.pipeline_step(state.pipeline_state, action)
 
-    if "steps" in state.info.keys():
-        seed = state.info["seed"] + jp.where(state.info["steps"], 0, 1)
+    if 'steps' in state.info.keys():
+      seed = state.info['seed'] + jp.where(state.info['steps'], 0, 1)
     else:
-        seed = state.info["seed"]
-        
-    info = {"seed": seed}
+      seed = state.info['seed']
+
+    info = {'seed': seed}
 
     obs = self._get_obs(pipeline_state)
     state.metrics.update(
@@ -121,7 +122,7 @@ class Pusher(PipelineEnv):
         reward_dist=reward_dist,
         reward_ctrl=reward_ctrl,
         success=jp.array(obj_to_goal_dist < 0.1, dtype=float),
-        success_hard=jp.array(obj_to_goal_dist < 0.05, dtype=float)
+        success_hard=jp.array(obj_to_goal_dist < 0.05, dtype=float),
     )
     state.info.update(info)
     return state.replace(pipeline_state=pipeline_state, obs=obs, reward=reward)
@@ -133,18 +134,21 @@ class Pusher(PipelineEnv):
     )
     return jp.concatenate([
         # state
-        pipeline_state.q[:7], # Rotations of arm joints [7, ]
-        x_i.pos[self._tips_arm_idx], # Arm tip position [3, ]
-        x_i.pos[self._object_idx], # Movable object position [3, ]
-        pipeline_state.qd[:7], # Rotational velocities of arm joints [7, ]
+        pipeline_state.q[:7],  # Rotations of arm joints [7, ]
+        x_i.pos[self._tips_arm_idx],  # Arm tip position [3, ]
+        x_i.pos[self._object_idx],  # Movable object position [3, ]
+        pipeline_state.qd[:7],  # Rotational velocities of arm joints [7, ]
         # goal
-        x_i.pos[self._goal_idx], # This is the position we want the object to end up in [3, ]
+        x_i.pos[
+            self._goal_idx
+        ],  # This is the position we want the object to end up in [3, ]
     ])
 
 
-# This is debug env for pusher. 
+# This is debug env for pusher.
 # The goal here is the same as in Reacher: to get arm to given position.
 class PusherReacher(PipelineEnv):
+
   def __init__(self, backend='generalized', **kwargs):
     path = epath.resource_path('brax') / 'envs/assets/pusher.xml'
     sys = mjcf.load(path)
@@ -167,7 +171,7 @@ class PusherReacher(PipelineEnv):
     self._tips_arm_idx = self.sys.link_names.index('r_wrist_flex_link')
     self._object_idx = self.sys.link_names.index('object')
     self._goal_idx = self.sys.link_names.index('goal')
-    
+
     self.state_dim = 17
     self.goal_indices = jp.array([14, 15, 16])
 
@@ -204,14 +208,14 @@ class PusherReacher(PipelineEnv):
     obs = self._get_obs(pipeline_state)
     reward, done, zero = jp.zeros(3)
     metrics = {
-      'reward_dist': zero, 
-      'reward_ctrl': zero, 
-      'reward_near': zero,
-      'success': zero,
-      'success_hard': zero,
+        'reward_dist': zero,
+        'reward_ctrl': zero,
+        'reward_near': zero,
+        'success': zero,
+        'success_hard': zero,
     }
 
-    info = {"seed": 0}
+    info = {'seed': 0}
     state = State(pipeline_state, obs, reward, done, metrics)
     state.info.update(info)
 
@@ -225,19 +229,21 @@ class PusherReacher(PipelineEnv):
     vec_1 = x_i.pos[self._object_idx] - x_i.pos[self._tips_arm_idx]
     vec_2 = x_i.pos[self._object_idx] - x_i.pos[self._goal_idx]
 
-    arm_to_goal_dist = math.safe_norm(x_i.pos[self._goal_idx] - x_i.pos[self._tips_arm_idx])
+    arm_to_goal_dist = math.safe_norm(
+        x_i.pos[self._goal_idx] - x_i.pos[self._tips_arm_idx]
+    )
 
     reward_dist = -arm_to_goal_dist
     reward = reward_dist
 
     pipeline_state = self.pipeline_step(state.pipeline_state, action)
 
-    if "steps" in state.info.keys():
-        seed = state.info["seed"] + jp.where(state.info["steps"], 0, 1)
+    if 'steps' in state.info.keys():
+      seed = state.info['seed'] + jp.where(state.info['steps'], 0, 1)
     else:
-        seed = state.info["seed"]
-        
-    info = {"seed": seed}
+      seed = state.info['seed']
+
+    info = {'seed': seed}
 
     obs = self._get_obs(pipeline_state)
     state.metrics.update(
@@ -245,7 +251,7 @@ class PusherReacher(PipelineEnv):
         reward_dist=reward_dist,
         reward_ctrl=0.0,
         success=jp.array(arm_to_goal_dist < 0.1, dtype=float),
-        success_hard=jp.array(arm_to_goal_dist < 0.05, dtype=float)
+        success_hard=jp.array(arm_to_goal_dist < 0.05, dtype=float),
     )
     state.info.update(info)
     return state.replace(pipeline_state=pipeline_state, obs=obs, reward=reward)
@@ -257,9 +263,9 @@ class PusherReacher(PipelineEnv):
     )
     return jp.concatenate([
         # state
-        pipeline_state.q[:7], # Rotations of arm joints [7, ]
-        pipeline_state.qd[:7], # Rotational velocities of arm joints [7, ]
-        x_i.pos[self._tips_arm_idx], # Arm tip position [3, ]
+        pipeline_state.q[:7],  # Rotations of arm joints [7, ]
+        pipeline_state.qd[:7],  # Rotational velocities of arm joints [7, ]
+        x_i.pos[self._tips_arm_idx],  # Arm tip position [3, ]
         # goal
         x_i.pos[self._goal_idx],
     ])

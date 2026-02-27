@@ -1,3 +1,4 @@
+import os
 from brax import actuator
 from brax import base
 from brax.envs.base import PipelineEnv, State
@@ -5,7 +6,6 @@ from brax.io import mjcf
 import jax
 from jax import numpy as jp
 import mujoco
-import os
 
 # This is based on original Humanoid environment from Brax
 # https://github.com/google/brax/blob/main/brax/envs/humanoid.py
@@ -14,7 +14,9 @@ import os
 # This is chosen to be very close to the z coordinate of the humanoid torso, when it is standing straight
 TARGET_Z_COORD = 1.25
 
+
 class Humanoid(PipelineEnv):
+
   def __init__(
       self,
       forward_reward_weight=1.25,
@@ -25,11 +27,13 @@ class Humanoid(PipelineEnv):
       reset_noise_scale=0.0,
       exclude_current_positions_from_observation=False,
       backend='generalized',
-      min_goal_dist = 1.0,
-      max_goal_dist = 5.0,
+      min_goal_dist=1.0,
+      max_goal_dist=5.0,
       **kwargs,
   ):
-    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'assets', "humanoid.xml")
+    path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), 'assets', 'humanoid.xml'
+    )
     sys = mjcf.load(path)
 
     n_frames = 5
@@ -66,7 +70,7 @@ class Humanoid(PipelineEnv):
     self._target_ind = self.sys.link_names.index('target')
     self._min_goal_dist = min_goal_dist
     self._max_goal_dist = max_goal_dist
-    
+
     self.state_dim = 268
     self.goal_indices = jp.array([0, 1, 2])
 
@@ -100,11 +104,11 @@ class Humanoid(PipelineEnv):
         'dist': zero,
         'x_velocity': zero,
         'y_velocity': zero,
-        "success": zero,
-        "success_easy": zero,
+        'success': zero,
+        'success_easy': zero,
     }
-    
-    info = {"seed":0}
+
+    info = {'seed': 0}
     state = State(pipeline_state, obs, reward, done, metrics)
     state.info.update(info)
 
@@ -113,11 +117,11 @@ class Humanoid(PipelineEnv):
   def step(self, state: State, action: jax.Array) -> State:
     """Runs one timestep of the environment's dynamics."""
 
-    if "steps" in state.info.keys():
-        seed = state.info["seed"] + jp.where(state.info["steps"], 0, 1)
+    if 'steps' in state.info.keys():
+      seed = state.info['seed'] + jp.where(state.info['steps'], 0, 1)
     else:
-        seed = state.info["seed"]
-    info = {"seed": seed}
+      seed = state.info['seed']
+    info = {'seed': seed}
 
     # Scale action from [-1,1] to actuator limits
     action_min = self.sys.actuator.ctrl_range[:, 0]
@@ -148,7 +152,7 @@ class Humanoid(PipelineEnv):
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     reward = -distance_to_target + healthy_reward - ctrl_cost
     success = jp.array(distance_to_target < 0.5, dtype=float)
-    success_easy = jp.array(distance_to_target < 2., dtype=float)
+    success_easy = jp.array(distance_to_target < 2.0, dtype=float)
     state.metrics.update(
         forward_reward=forward_reward,
         reward_linvel=forward_reward,
@@ -194,8 +198,8 @@ class Humanoid(PipelineEnv):
     com_velocity = jp.hstack([com_vel, com_ang])
 
     qfrc_actuator = actuator.to_tau(
-        self.sys, action, pipeline_state.q, pipeline_state.qd)
-
+        self.sys, action, pipeline_state.q, pipeline_state.qd
+    )
 
     target_pos = pipeline_state.x.pos[-1][:2]
     # external_contact_forces are excluded
@@ -206,7 +210,7 @@ class Humanoid(PipelineEnv):
         com_velocity.ravel(),
         qfrc_actuator,
         target_pos,
-        jp.array([TARGET_Z_COORD]), # Height of the target is fixed
+        jp.array([TARGET_Z_COORD]),  # Height of the target is fixed
     ])
 
   def _com(self, pipeline_state: base.State) -> jax.Array:
@@ -225,12 +229,14 @@ class Humanoid(PipelineEnv):
         jp.sum(jax.vmap(jp.multiply)(inertia.mass, x_i.pos), axis=0) / mass_sum
     )
     return com, inertia, mass_sum, x_i  # pytype: disable=bad-return-type  # jax-ndarray
-  
+
   def _random_target(self, rng: jax.Array):
     rng, rng1, rng2 = jax.random.split(rng, 3)
 
     # NOTE: this is NOT uniform sampling from 2d torus, it favors closer targets
-    dist = jax.random.uniform(rng1, minval=self._min_goal_dist, maxval=self._max_goal_dist)
+    dist = jax.random.uniform(
+        rng1, minval=self._min_goal_dist, maxval=self._max_goal_dist
+    )
     ang = jp.pi * 2.0 * jax.random.uniform(rng2)
     target_x = dist * jp.cos(ang)
     target_y = dist * jp.sin(ang)
