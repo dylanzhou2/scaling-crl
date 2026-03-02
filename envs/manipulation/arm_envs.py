@@ -27,8 +27,9 @@ class ArmEnvs(PipelineEnv):
     if backend != "mjx":
       raise Exception("Use the mjx backend for stability/reasonable speed.")
     super().__init__(sys=sys, backend=backend, **kwargs)
-    print("Joint names:", self.sys.joint_names)
-    print("Joint qpos indices:", self.sys.qpos_size())
+    print("Joint names:", self.sys.link_names)
+    print("Position vector size (q):", self.sys.q_size())
+    print("Velocity vector size (qd):", self.sys.qd_size())
 
   def reset(self, rng: jax.Array) -> State:
     """Resets the environment to an initial state."""
