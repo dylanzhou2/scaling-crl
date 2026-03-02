@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from envs.manipulation.tidybot_env import TidybotEnv
+from envs.manipulation.tidybot_envs import TidybotEnv
 
 def test_tidybot_env():
     # 1. Initialize Environment
