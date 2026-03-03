@@ -562,6 +562,15 @@ if __name__ == "__main__":
       args.goal_start_idx = 0
       args.goal_end_idx = 3
 
+    elif env_id == "tidybot_maze":
+      from envs.mobile_manipulation.tidybot_maze import TidyBotMaze
+      # You can pass grid dimensions through env_id or separate args
+      width, height = 11, 11 
+      env = TidyBotMaze(width=width, height=height, include_clutter=True)
+      
+      args.obs_dim = 6 + (width * height) # base_pos(3) + base_vel(3) + grid
+      args.goal_start_idx = args.obs_dim
+      args.goal_end_idx = args.obs_dim + 2
     else:
       raise NotImplementedError
 
