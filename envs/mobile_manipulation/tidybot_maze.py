@@ -1,3 +1,4 @@
+import numpy as np
 from brax import base
 from brax.envs.base import PipelineEnv, State
 from brax.io import mjcf
@@ -12,6 +13,10 @@ class TidyBotMaze(PipelineEnv):
         xml_string, self.goal_pos = make_tidybot_maze(
             self.grid, size_scaling=4.0, include_clutter=include_clutter
         )
+
+        start_indices = np.argwhere(np.array(self.grid) == 2)[0] 
+        self.start_pos = jnp.array(start_indices * 4.0)
+
         sys = mjcf.loads(xml_string)
         
         # 2. Define Tucked Arm Configuration
@@ -22,11 +27,12 @@ class TidyBotMaze(PipelineEnv):
 
     def reset(self, rng: jax.Array) -> State:
         # Find starting position from grid
-        start_indices = jnp.argwhere(jnp.array(self.grid) == 2)[0]
-        start_pos = start_indices * 4.0
+        # start_indices = jnp.argwhere(jnp.array(self.grid) == 2)[0]
+        # start_pos = start_indices * 4.0
         
         # Initial Q: [base_x, base_y, base_th, arm_1...7, gripper...]
-        q = jnp.zeros(self.sys.q_size()).at[:2].set(start_pos)
+        # q = jnp.zeros(self.sys.q_size()).at[:2].set(start_pos)
+        q = jnp.zeros(self.sys.q_size()).at[:2].set(self.start_pos)
         qd = jnp.zeros(self.sys.qd_size())
         
         pipeline_state = self.pipeline_init(q, qd)
