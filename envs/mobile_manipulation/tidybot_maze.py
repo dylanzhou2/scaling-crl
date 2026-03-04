@@ -10,13 +10,11 @@ class TidyBotMaze(PipelineEnv):
     def __init__(self, width=11, height=11, include_clutter=True, backend="mjx", **kwargs):
         # 1. Setup Procedural Environment
         self.grid = generate_procedural_grid(width, height)
+        self.grid_jax = jnp.array(self.grid)
+        self.grid_obs_static = jnp.array(self.grid).flatten()
         xml_string, self.goal_pos = make_tidybot_maze(
             self.grid, size_scaling=4.0, include_clutter=include_clutter
         )
-
-        start_indices = np.argwhere(np.array(self.grid) == 2)[0] 
-        self.start_pos = jnp.array(start_indices * 4.0)
-
         sys = mjcf.loads(xml_string)
         
         # 2. Define Tucked Arm Configuration
@@ -26,13 +24,16 @@ class TidyBotMaze(PipelineEnv):
         super().__init__(sys=sys, backend=backend, n_frames=5, **kwargs)
 
     def reset(self, rng: jax.Array) -> State:
-        # Find starting position from grid
-        # start_indices = jnp.argwhere(jnp.array(self.grid) == 2)[0]
-        # start_pos = start_indices * 4.0
+        # Use jnp.nonzero with a fixed size to satisfy JIT compilation
+        # This prevents the ConcretizationTypeError by fixing the output shape
+        rows, cols = jnp.nonzero(self.grid_jax == 2, size=1)
         
-        # Initial Q: [base_x, base_y, base_th, arm_1...7, gripper...]
-        # q = jnp.zeros(self.sys.q_size()).at[:2].set(start_pos)
-        q = jnp.zeros(self.sys.q_size()).at[:2].set(self.start_pos)
+        # Extract the first coordinate found
+        start_indices = jnp.array([rows[0], cols[0]])
+        start_pos = start_indices * 4.0
+        
+        # Initialize the robot base position at these coordinates
+        q = jnp.zeros(self.sys.q_size()).at[:2].set(start_pos)
         qd = jnp.zeros(self.sys.qd_size())
         
         pipeline_state = self.pipeline_init(q, qd)
@@ -61,7 +62,7 @@ class TidyBotMaze(PipelineEnv):
         base_vel = pipeline_state.qd[:3]
         
         # Flattened Global Map (Occupancy Grid)
-        grid_obs = jnp.array(self.grid).flatten()
+        grid_obs = self.grid_obs_static
         
         return jnp.concatenate([
             base_pos,           # 3: x, y, theta
