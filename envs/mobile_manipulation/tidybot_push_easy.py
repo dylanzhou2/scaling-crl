@@ -6,7 +6,7 @@ from jax import numpy as jnp
 class TidyBotPushEasy(TidyBotEnv):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Verify the layout assumption during instantiation
+        # Verification prints confirm the layout during initialization
         print(f"\n--- {self.env_name} Layout Verification ---")
         print("Link names and indices:")
         for i, name in enumerate(self.sys.link_names):
@@ -29,13 +29,15 @@ class TidyBotPushEasy(TidyBotEnv):
         self.env_name = "tidybot_push_easy"
         self.episode_length = 50
 
-        # Updated based on q=32 verification:
-        # Robot (0-17), Cube (18-24), Goal (25-31)
+        # Based on q=32 verification:
+        # Robot (0-17): Base(3) + Arm(7) + Gripper(8)
+        # Cube (18-24): 7-dim freejoint starts at index 18
+        # Goal (25-31): 7-dim freejoint starts at index 25
         self.cube_q_idx = 18 
         self.goal_q_idx = 25 
 
-        # Goal indices mapping within the 20-dim state observation vector
-        # [base(3), arm(7), cube(3), eef(3), eef_vel(3), finger(1)]
+        # Observation mapping within the 20-dim state vector (before goal is appended)
+        # indices: base(0-2), arm(3-9), cube_pos(10-12), eef(13-18), finger(19)
         self.goal_indices = jnp.array([10, 11, 12]) 
         self.completion_goal_indices = self.goal_indices
         self.state_dim = 20
@@ -84,13 +86,13 @@ class TidyBotPushEasy(TidyBotEnv):
 
     def _get_obs(self, pipeline_state: base.State, goal: jax.Array, timestep) -> jax.Array:
         """
-        Observation space (23-dim total):
+        Observation space (23-dim):
         - base_q (3-dim): x, y, theta
         - arm_q (7-dim): joint angles
-        - cube_pos (3-dim): current cube location (indices 18-20)
+        - cube_pos (3-dim): current cube location (from index 18)
         - eef (6-dim): position and velocity of bracelet_link
-        - finger (1-dim): distance between right_follower and left_follower
-        - goal (3-dim): target cube position
+        - finger (1-dim): distance between right_follower (11) and left_follower (15)
+        - goal (3-dim): target location
         """
         base_q = pipeline_state.q[:3]
         arm_q = pipeline_state.q[3:10]
@@ -99,7 +101,7 @@ class TidyBotPushEasy(TidyBotEnv):
         eef_pos = pipeline_state.x.pos[self.eef_index]
         eef_vel = pipeline_state.xd.vel[self.eef_index]
         
-        # Fixed: Using indices 11 (right_follower) and 15 (left_follower)
+        # Fixed: Using indices 11 and 15 from the verification output
         finger_dist = jnp.linalg.norm(
             pipeline_state.x.pos[11] - pipeline_state.x.pos[15], keepdims=True
         )

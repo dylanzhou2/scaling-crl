@@ -571,6 +571,23 @@ if __name__ == "__main__":
       args.obs_dim = 6 + (width * height) # base_pos(3) + base_vel(3) + grid
       args.goal_start_idx = args.obs_dim
       args.goal_end_idx = args.obs_dim + 2
+    
+    elif env_id == "tidybot_push_easy":
+      from envs.manipulation.tidybot_push_easy import TidyBotPushEasy
+
+      env = TidyBotPushEasy(
+          backend="mjx",
+      )
+
+      # Obs dim is the state part of the observation (20 dimensions)
+      # [base(3), arm(7), cube(3), eef_pos(3), eef_vel(3), finger(1)]
+      args.obs_dim = 20
+      
+      # For pushing, the goal is reaching a specific cube position.
+      # These indices point to the cube's position within the 20-dim state vector.
+      args.goal_start_idx = 10
+      args.goal_end_idx = 13
+
     else:
       raise NotImplementedError
 
