@@ -370,6 +370,7 @@ if __name__ == "__main__":
     if env_id == "reacher":
       from envs.reacher import Reacher
 
+      print("REACHER ENV")
       env = Reacher(
           backend="spring",
       )
@@ -378,6 +379,7 @@ if __name__ == "__main__":
       args.goal_end_idx = 7
     elif env_id == "pusher":
       from envs.pusher import Pusher
+      print("PUSHER ENV")
 
       env = Pusher(
           backend="spring",
@@ -388,6 +390,7 @@ if __name__ == "__main__":
     elif env_id == "ant":
       from envs.ant import Ant
 
+      print("ANT ENV")
       env = Ant(
           backend="spring",
           exclude_current_positions_from_observation=False,
@@ -404,6 +407,7 @@ if __name__ == "__main__":
       if "gen" not in env_id:
         from envs.ant_maze import AntMaze
 
+        print("ANT MAZE ENV")
         env = AntMaze(
             backend="spring",
             exclude_current_positions_from_observation=False,
@@ -417,6 +421,7 @@ if __name__ == "__main__":
       else:
         from envs.ant_maze_generalization import AntMazeGeneralization
 
+        print("ANT MAZE GENERALIZATION ENV")
         gen_idx = env_id.find("gen")
         maze_layout_name = env_id[4 : gen_idx - 1]
         generalization_config = env_id[gen_idx + 4 :]
@@ -439,7 +444,9 @@ if __name__ == "__main__":
 
     elif env_id == "ant_ball":
       from envs.ant_ball import AntBall
-
+      
+      print("ANT BALL ENV")
+  
       env = AntBall(
           backend="spring",
           exclude_current_positions_from_observation=False,
@@ -452,7 +459,9 @@ if __name__ == "__main__":
 
     elif env_id == "ant_push":
       from envs.ant_push import AntPush
-
+      
+      print("ANT PUSH ENV")
+  
       env = AntPush(
           backend="mjx",
       )
@@ -464,6 +473,7 @@ if __name__ == "__main__":
     elif env_id == "humanoid":
       from envs.humanoid import Humanoid
 
+      print("HUMANOID ENV")
       env = Humanoid(
           backend="spring",
           exclude_current_positions_from_observation=False,
@@ -476,7 +486,9 @@ if __name__ == "__main__":
 
     elif "humanoid" in env_id and "maze" in env_id:
       from envs.humanoid_maze import HumanoidMaze
-
+      
+      print("HUMANOID MAZE ENV")
+  
       env = HumanoidMaze(backend="spring", maze_layout_name=env_id[9:])
 
       args.obs_dim = 268
@@ -485,7 +497,9 @@ if __name__ == "__main__":
 
     elif env_id == "arm_reach":
       from envs.manipulation.arm_reach import ArmReach
-
+      
+      print("ARM REACH ENV")
+  
       env = ArmReach(
           backend="mjx",
       )
@@ -496,7 +510,9 @@ if __name__ == "__main__":
 
     elif env_id == "arm_binpick_easy":
       from envs.manipulation.arm_binpick_easy import ArmBinpickEasy
-
+      
+      print("ARM BINPICK EASY ENV")
+  
       env = ArmBinpickEasy(
           backend="mjx",
       )
@@ -507,7 +523,9 @@ if __name__ == "__main__":
 
     elif env_id == "arm_binpick_hard":
       from envs.manipulation.arm_binpick_hard import ArmBinpickHard
-
+      
+      print("ARM BINPICK HARD ENV")
+  
       env = ArmBinpickHard(
           backend="mjx",
       )
@@ -518,7 +536,9 @@ if __name__ == "__main__":
 
     elif env_id == "arm_binpick_easy_EEF":
       from envs.manipulation.arm_binpick_easy_EEF import ArmBinpickEasyEEF
-
+      
+      print("ARM BINPICK EASY EEF ENV")
+  
       env = ArmBinpickEasyEEF(
           backend="mjx",
       )
@@ -529,7 +549,9 @@ if __name__ == "__main__":
 
     elif "arm_grasp" in env_id:  # either arm_grasp or arm_grasp_0.5, etc
       from envs.manipulation.arm_grasp import ArmGrasp
-
+      
+      print("ARM GRASP ENV")
+  
       cube_noise_scale = float(env_id[10:]) if len(env_id) > 9 else 0.3
       env = ArmGrasp(
           cube_noise_scale=cube_noise_scale,
@@ -542,7 +564,9 @@ if __name__ == "__main__":
 
     elif env_id == "arm_push_easy":
       from envs.manipulation.arm_push_easy import ArmPushEasy
-
+      
+      print("ARM PUSH EASY ENV")
+  
       env = ArmPushEasy(
           backend="mjx",
       )
@@ -554,6 +578,7 @@ if __name__ == "__main__":
     elif env_id == "arm_push_hard":
       from envs.manipulation.arm_push_hard import ArmPushHard
 
+      print("ARM PUSH HARD ENV")
       env = ArmPushHard(
           backend="mjx",
       )
@@ -564,8 +589,9 @@ if __name__ == "__main__":
 
     elif env_id == "tidybot_maze":
       from envs.mobile_manipulation.tidybot_maze import TidyBotMaze
+      print("TIDYBOT MAZE ENV")
       # You can pass grid dimensions through env_id or separate args
-      width, height = 11, 11 
+      width, height = 11, 11
       env = TidyBotMaze(width=width, height=height, include_clutter=True)
       
       args.obs_dim = 6 + (width * height) # base_pos(3) + base_vel(3) + grid
@@ -573,8 +599,9 @@ if __name__ == "__main__":
       args.goal_end_idx = args.obs_dim + 2
     
     elif env_id == "tidybot_push_easy":
-      from envs.manipulation.tidybot_push_easy import TidyBotPushEasy
-
+      from envs.mobile_manipulation.tidybot_push_easy import TidyBotPushEasy
+      print("TIDYBOT PUSH EASY ENV")
+      
       env = TidyBotPushEasy(
           backend="mjx",
       )

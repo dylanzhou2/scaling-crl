@@ -78,3 +78,51 @@ def make_tidybot_maze(grid, size_scaling=4.0, include_clutter=True):
     )
 
     return ET.tostring(tree.getroot(), encoding='unicode'), goal_pos
+
+def make_tidybot_mocap_maze(width, height, size_scaling=4.0):
+    import os
+    import xml.etree.ElementTree as ET
+    
+    current_dir = os.path.dirname(__file__)
+    assets_dir = os.path.abspath(os.path.join(current_dir, "..", "assets", "stanford_tidybot2", "assets"))
+    asset_path = os.path.join(current_dir, "..", "assets", "stanford_tidybot2", "tidybot.xml")
+    
+    tree = ET.parse(asset_path)
+    root = tree.getroot()
+    compiler = root.find(".//compiler")
+    if compiler is not None:
+        compiler.set("meshdir", assets_dir)
+    worldbody = tree.find(".//worldbody")
+
+    # Create a movable MOCAP body for EVERY possible grid cell
+    for i in range(height):
+        for j in range(width):
+            body = ET.SubElement(
+                worldbody, "body",
+                name=f"wall_{i}_{j}",
+                pos=f"{i * size_scaling} {j * size_scaling} -10.0",  # Hidden underground by default
+                mocap="true"
+            )
+            ET.SubElement(
+                body, "geom",
+                type="box",
+                size=f"{size_scaling/2} {size_scaling/2} 0.5",
+                rgba="0.5 0.5 0.5 1"
+            )
+
+    # Create a MOCAP body for the goal visualization
+    goal_body = ET.SubElement(
+        worldbody, "body",
+        name="goal_site",
+        pos="0 0 -10.0",
+        mocap="true"
+    )
+    ET.SubElement(
+        goal_body, "geom",
+        type="cylinder",
+        size=f"{size_scaling/4} 0.01",
+        rgba="0 1 0 0.3",
+        contype="0", conaffinity="0"
+    )
+
+    return ET.tostring(tree.getroot(), encoding='unicode')

@@ -11,10 +11,10 @@ class TidyBotPushEasy(TidyBotEnv):
         print("Link names and indices:")
         for i, name in enumerate(self.sys.link_names):
             print(f"  Index {i}: {name}")
-        
+
         print("Position vector size (q):", self.sys.q_size())
         print("Velocity vector size (qd):", self.sys.qd_size())
-        
+
         try:
             cube_idx = self.sys.link_names.index("cube")
             goal_idx = self.sys.link_names.index("goal_marker")
