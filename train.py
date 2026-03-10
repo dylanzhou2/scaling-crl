@@ -615,6 +615,20 @@ if __name__ == "__main__":
       args.goal_start_idx = 10
       args.goal_end_idx = 13
 
+    elif env_id == "tidybot_push_hard":
+      from envs.mobile_manipulation.tidybot_push_hard import TidyBotPushHard
+      print("TIDYBOT PUSH HARD ENV")
+      
+      env = TidyBotPushHard(
+          backend="mjx",
+      )
+
+      # Obs dim is the state part of the observation (20 dimensions)
+      args.obs_dim = 20
+      
+      # These indices point to the cube's position within the 20-dim state vector.
+      args.goal_start_idx = 10
+      args.goal_end_idx = 13
     else:
       raise NotImplementedError
 
@@ -659,7 +673,10 @@ if __name__ == "__main__":
   actor_state = TrainState.create(
       apply_fn=actor.apply,
       params=actor.init(actor_key, np.ones([1, obs_size])),
-      tx=optax.adam(learning_rate=args.actor_lr),
+      tx=optax.chain(
+          optax.clip_by_global_norm(1.0),
+          optax.adam(learning_rate=args.actor_lr)
+      ),
   )
 
   # Critic
@@ -685,7 +702,10 @@ if __name__ == "__main__":
   critic_state = TrainState.create(
       apply_fn=None,
       params={"sa_encoder": sa_encoder_params, "g_encoder": g_encoder_params},
-      tx=optax.adam(learning_rate=args.critic_lr),
+      tx=optax.chain(
+          optax.clip_by_global_norm(1.0),
+          optax.adam(learning_rate=args.critic_lr),
+      ),
   )
 
   # Entropy coefficient
@@ -696,7 +716,10 @@ if __name__ == "__main__":
   alpha_state = TrainState.create(
       apply_fn=None,
       params={"log_alpha": log_alpha},
-      tx=optax.adam(learning_rate=args.alpha_lr),
+      tx=optax.chain(
+          optax.clip_by_global_norm(1.0),
+          optax.adam(learning_rate=args.alpha_lr),
+      ),
   )
 
   # Trainstate
@@ -769,6 +792,18 @@ if __name__ == "__main__":
     nstate = env.step(env_state, actions)
     state_extras = {x: nstate.info[x] for x in extra_fields}
 
+    # --- INJECT THIS NAN CATCHER ---
+    is_nan = jnp.isnan(nstate.obs).any()
+    jax.lax.cond(
+        is_nan,
+        lambda: jax.debug.print(
+            "🚨 SIMULATOR PHYSICS EXPLODED! 🚨\nActions causing it: {}\nResulting Obs: {}", 
+            actions[0], nstate.obs[0] # Just printing the first env of the batch to avoid terminal flood
+        ),
+        lambda: None
+    )
+    # -------------------------------
+
     return nstate, Transition(
         observation=env_state.obs,
         action=actions,
@@ -808,7 +843,7 @@ if __name__ == "__main__":
         training_state.critic_state.params["g_encoder"], goal
     )
 
-    q_values = -jnp.sqrt(jnp.sum((sa_reprs - g_repr) ** 2, axis=-1))
+    q_values = -jnp.sqrt(jnp.sum((sa_reprs - g_repr) ** 2, axis=-1) + 1e-6)
 
     best_action_idx = jnp.argmax(q_values, axis=0)
     best_actions = jnp.take_along_axis(
@@ -920,7 +955,8 @@ if __name__ == "__main__":
       sa_repr = sa_encoder.apply(sa_encoder_params, state, action)
       g_repr = g_encoder.apply(g_encoder_params, goal)
 
-      qf_pi = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1))
+      # qf_pi = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1))
+      qf_pi = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1) + 1e-6)
 
       if args.disable_entropy:
         actor_loss = -jnp.mean(qf_pi)
@@ -992,7 +1028,7 @@ if __name__ == "__main__":
 
       # InfoNCE
       logits = -jnp.sqrt(
-          jnp.sum((sa_repr[:, None, :] - g_repr[None, :, :]) ** 2, axis=-1)
+          jnp.sum((sa_repr[:, None, :] - g_repr[None, :, :]) ** 2, axis=-1) + 1e-6
       )  # shape = BxB
       critic_loss = -jnp.mean(
           jnp.diag(logits) - jax.nn.logsumexp(logits, axis=1)

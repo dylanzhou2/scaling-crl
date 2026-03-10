@@ -1,4 +1,4 @@
-<mujoco model="tidybot_push">
+<mujoco model="tidybot_push_hard">
   <compiler angle="radian" meshdir="tidybot/assets" autolimits="true"/>
 
   <option integrator="implicitfast"/>
@@ -202,19 +202,19 @@
       </body>
     </body>
 
-    <body name="binA" pos="-0.1 0.6 0">
-      <geom name="binA_floor" pos="0 0 0.0005" size="0.1 0.1 0.0005" type="box" rgba="0 0.2 0.8 1" contype="0" conaffinity="0"/>
+    <body name="binA" pos="-0.25 0.65 0">
+      <geom name="binA_floor" pos="0 0 0.0005" size="0.25 0.25 0.0005" type="box" rgba="0 0.2 0.8 1" contype="0" conaffinity="0"/>
     </body>
-    <body name="binB" pos="0.1 0.6 0">
-      <geom name="binB_floor" pos="0 0 0.0005" size="0.1 0.1 0.0005" type="box" rgba="0.8 0 0 1" contype="0" conaffinity="0"/>
+    <body name="binB" pos="0.25 0.65 0">
+      <geom name="binB_floor" pos="0 0 0.0005" size="0.25 0.25 0.0005" type="box" rgba="0.8 0 0 1" contype="0" conaffinity="0"/>
     </body>
     
-    <body name="cube" pos="-0.1 0.6 0.07">
+    <body name="cube" pos="-0.25 0.65 0.07">
       <freejoint/>
       <geom name="cube_geom" size="0.03 0.03 0.03" type="box" rgba="0 0.4 0 1" contype="1" conaffinity="1"/>
     </body>
       
-    <body name="goal_marker" pos="-0.3 0.6 0.07" gravcomp="1">
+    <body name="goal_marker" pos="-0.25 0.65 0.07" gravcomp="1">
       <freejoint/>
       <geom name="goal_marker_geom" size="0.03 0.03 0.03" type="box" rgba="0.3 1 0.3 1" contype="0" conaffinity="0"/>
     </body>
@@ -255,9 +255,6 @@
   </equality>
 
   <actuator>
-    <!-- <position name="joint_x" joint="joint_x" kp="1000000" kv="50000"/>
-    <position name="joint_y" joint="joint_y" kp="1000000" kv="50000"/>
-    <position name="joint_th" joint="joint_th" kp="50000" kv="1000"/> -->
     <position name="joint_x" joint="joint_x" kp="50000" kv="2500"/>
     <position name="joint_y" joint="joint_y" kp="50000" kv="2500"/>
     <position name="joint_th" joint="joint_th" kp="10000" kv="500"/>
