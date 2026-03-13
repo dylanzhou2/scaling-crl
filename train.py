@@ -534,7 +534,7 @@ if __name__ == "__main__":
       args.goal_start_idx = 0
       args.goal_end_idx = 3
 
-    elif env_id == "arm_binpick_easy_EEF":
+    elif env_id.strip().lower() == "arm_binpick_easy_eef":
       from envs.manipulation.arm_binpick_easy_EEF import ArmBinpickEasyEEF
       
       print("ARM BINPICK EASY EEF ENV")
@@ -791,18 +791,6 @@ if __name__ == "__main__":
 
     nstate = env.step(env_state, actions)
     state_extras = {x: nstate.info[x] for x in extra_fields}
-
-    # --- INJECT THIS NAN CATCHER ---
-    is_nan = jnp.isnan(nstate.obs).any()
-    jax.lax.cond(
-        is_nan,
-        lambda: jax.debug.print(
-            "🚨 SIMULATOR PHYSICS EXPLODED! 🚨\nActions causing it: {}\nResulting Obs: {}", 
-            actions[0], nstate.obs[0] # Just printing the first env of the batch to avoid terminal flood
-        ),
-        lambda: None
-    )
-    # -------------------------------
 
     return nstate, Transition(
         observation=env_state.obs,
