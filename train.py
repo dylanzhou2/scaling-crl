@@ -100,6 +100,9 @@ class Args:
   num_render: int = 10
   save_buffer: int = 0
 
+  algorithm: str = "crl"  # "crl", "sac", or "vpg"
+  tau: float = 0.005  # soft update coefficient for SAC target networks
+
   # to be filled in runtime
   env_steps_per_actor_step: int = 0
   """number of env steps per actor step (computed in runtime)"""
@@ -259,6 +262,56 @@ class Actor(nn.Module):
     return mean, log_std
 
 
+class QNetwork(nn.Module):
+  """Standard Q-network for SAC: Q(obs, action) -> scalar."""
+  network_width: int = 256
+  network_depth: int = 4
+  use_relu: int = 0
+
+  @nn.compact
+  def __call__(self, obs: jnp.ndarray, action: jnp.ndarray):
+    lecun_unfirom = variance_scaling(1 / 3, "fan_in", "uniform")
+    bias_init = nn.initializers.zeros
+    normalize = lambda x: nn.LayerNorm()(x)
+    activation = nn.relu if self.use_relu else nn.swish
+
+    x = jnp.concatenate([obs, action], axis=-1)
+    x = nn.Dense(
+        self.network_width, kernel_init=lecun_unfirom, bias_init=bias_init
+    )(x)
+    x = normalize(x)
+    x = activation(x)
+    for _ in range(self.network_depth // 4):
+      x = residual_block(x, self.network_width, normalize, activation)
+    x = nn.Dense(1, kernel_init=lecun_unfirom, bias_init=bias_init)(x)
+    return x.squeeze(-1)
+
+
+class ValueNetwork(nn.Module):
+  """Value network for VPG baseline: V(obs) -> scalar."""
+  network_width: int = 256
+  network_depth: int = 4
+  use_relu: int = 0
+
+  @nn.compact
+  def __call__(self, obs: jnp.ndarray):
+    lecun_unfirom = variance_scaling(1 / 3, "fan_in", "uniform")
+    bias_init = nn.initializers.zeros
+    normalize = lambda x: nn.LayerNorm()(x)
+    activation = nn.relu if self.use_relu else nn.swish
+
+    x = obs
+    x = nn.Dense(
+        self.network_width, kernel_init=lecun_unfirom, bias_init=bias_init
+    )(x)
+    x = normalize(x)
+    x = activation(x)
+    for _ in range(self.network_depth // 4):
+      x = residual_block(x, self.network_width, normalize, activation)
+    x = nn.Dense(1, kernel_init=lecun_unfirom, bias_init=bias_init)(x)
+    return x.squeeze(-1)
+
+
 @flax.struct.dataclass
 class TrainingState:
   """Contains training state for the learner"""
@@ -268,6 +321,7 @@ class TrainingState:
   actor_state: TrainState
   critic_state: TrainState
   alpha_state: TrainState
+  target_critic_params: Any
 
 
 class Transition(NamedTuple):
@@ -324,7 +378,7 @@ if __name__ == "__main__":
   )
 
   run_name = (
-      f"{args.env_id}{'_' + args.eval_env_id if args.eval_env_id else ''}_{args.batch_size}_{args.total_env_steps}_nenvs:{args.num_envs}_criticwidth:{args.critic_network_width}_actorwidth:{args.actor_network_width}_criticdepth:{args.critic_depth}_actordepth:{args.actor_depth}_actorskip:{args.actor_skip_connections}_criticskip:{args.critic_skip_connections}_{args.seed}"
+      f"{args.algorithm}_{args.env_id}{'_' + args.eval_env_id if args.eval_env_id else ''}_{args.batch_size}_{args.total_env_steps}_nenvs:{args.num_envs}_criticwidth:{args.critic_network_width}_actorwidth:{args.actor_network_width}_criticdepth:{args.critic_depth}_actordepth:{args.actor_depth}_actorskip:{args.actor_skip_connections}_criticskip:{args.critic_skip_connections}_{args.seed}"
   )
   print(f"run_name: {run_name}", flush=True)
 
@@ -679,36 +733,82 @@ if __name__ == "__main__":
       ),
   )
 
-  # Critic
-  sa_encoder = SA_encoder(
-      network_width=args.critic_network_width,
-      network_depth=args.critic_depth,
-      skip_connections=args.critic_skip_connections,
-      use_relu=args.use_relu,
-  )
-  sa_encoder_params = sa_encoder.init(
-      sa_key, np.ones([1, args.obs_dim]), np.ones([1, action_size])
-  )
-  g_encoder = G_encoder(
-      network_width=args.critic_network_width,
-      network_depth=args.critic_depth,
-      skip_connections=args.critic_skip_connections,
-      use_relu=args.use_relu,
-  )
-  g_encoder_params = g_encoder.init(
-      g_key, np.ones([1, args.goal_end_idx - args.goal_start_idx])
-  )
+  # Critic setup (algorithm-dependent)
+  if args.algorithm == "crl":
+    sa_encoder = SA_encoder(
+        network_width=args.critic_network_width,
+        network_depth=args.critic_depth,
+        skip_connections=args.critic_skip_connections,
+        use_relu=args.use_relu,
+    )
+    sa_encoder_params = sa_encoder.init(
+        sa_key, np.ones([1, args.obs_dim]), np.ones([1, action_size])
+    )
+    g_encoder = G_encoder(
+        network_width=args.critic_network_width,
+        network_depth=args.critic_depth,
+        skip_connections=args.critic_skip_connections,
+        use_relu=args.use_relu,
+    )
+    g_encoder_params = g_encoder.init(
+        g_key, np.ones([1, args.goal_end_idx - args.goal_start_idx])
+    )
+    critic_state = TrainState.create(
+        apply_fn=None,
+        params={"sa_encoder": sa_encoder_params, "g_encoder": g_encoder_params},
+        tx=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(learning_rate=args.critic_lr),
+        ),
+    )
+    target_critic_params = critic_state.params
 
-  critic_state = TrainState.create(
-      apply_fn=None,
-      params={"sa_encoder": sa_encoder_params, "g_encoder": g_encoder_params},
-      tx=optax.chain(
-          optax.clip_by_global_norm(1.0),
-          optax.adam(learning_rate=args.critic_lr),
-      ),
-  )
+  elif args.algorithm == "sac":
+    q_network1 = QNetwork(
+        network_width=args.critic_network_width,
+        network_depth=args.critic_depth,
+        use_relu=args.use_relu,
+    )
+    q_network2 = QNetwork(
+        network_width=args.critic_network_width,
+        network_depth=args.critic_depth,
+        use_relu=args.use_relu,
+    )
+    sa_key1, sa_key2 = jax.random.split(sa_key)
+    q1_params = q_network1.init(
+        sa_key1, np.ones([1, obs_size]), np.ones([1, action_size])
+    )
+    q2_params = q_network2.init(
+        sa_key2, np.ones([1, obs_size]), np.ones([1, action_size])
+    )
+    critic_state = TrainState.create(
+        apply_fn=None,
+        params={"q1": q1_params, "q2": q2_params},
+        tx=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(learning_rate=args.critic_lr),
+        ),
+    )
+    target_critic_params = critic_state.params
 
-  # Entropy coefficient
+  elif args.algorithm == "vpg":
+    value_network = ValueNetwork(
+        network_width=args.critic_network_width,
+        network_depth=args.critic_depth,
+        use_relu=args.use_relu,
+    )
+    value_params = value_network.init(sa_key, np.ones([1, obs_size]))
+    critic_state = TrainState.create(
+        apply_fn=value_network.apply,
+        params=value_params,
+        tx=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(learning_rate=args.critic_lr),
+        ),
+    )
+    target_critic_params = critic_state.params
+
+  # Entropy coefficient (used by CRL and SAC)
   target_entropy = (
       -args.entropy_param * action_size
   )  # action_size = 8 for ant, 17 for humanoid, etc
@@ -729,6 +829,7 @@ if __name__ == "__main__":
       actor_state=actor_state,
       critic_state=critic_state,
       alpha_state=alpha_state,
+      target_critic_params=target_critic_params,
   )
 
   # Replay Buffer
@@ -818,20 +919,34 @@ if __name__ == "__main__":
         for k in keys
     ])
 
-    state = env_state.obs[:, : args.obs_dim]
-    goal = env_state.obs[:, args.obs_dim :]
+    if args.algorithm == "crl":
+      state = env_state.obs[:, : args.obs_dim]
+      goal = env_state.obs[:, args.obs_dim :]
 
-    sa_reprs = jax.vmap(
-        lambda a: sa_encoder.apply(
-            training_state.critic_state.params["sa_encoder"], state, a
-        )
-    )(actions)
+      sa_reprs = jax.vmap(
+          lambda a: sa_encoder.apply(
+              training_state.critic_state.params["sa_encoder"], state, a
+          )
+      )(actions)
 
-    g_repr = g_encoder.apply(
-        training_state.critic_state.params["g_encoder"], goal
-    )
+      g_repr = g_encoder.apply(
+          training_state.critic_state.params["g_encoder"], goal
+      )
 
-    q_values = -jnp.sqrt(jnp.sum((sa_reprs - g_repr) ** 2, axis=-1) + 1e-6)
+      q_values = -jnp.sqrt(jnp.sum((sa_reprs - g_repr) ** 2, axis=-1) + 1e-6)
+
+    elif args.algorithm == "sac":
+      obs = env_state.obs
+      q_values = jax.vmap(
+          lambda a: jnp.minimum(
+              q_network1.apply(training_state.critic_state.params["q1"], obs, a),
+              q_network2.apply(training_state.critic_state.params["q2"], obs, a),
+          )
+      )(actions)
+
+    else:
+      # VPG: no Q-network, just use the first sample
+      q_values = jnp.zeros((K, actions.shape[1]))
 
     best_action_idx = jnp.argmax(q_values, axis=0)
     best_actions = jnp.take_along_axis(
@@ -886,6 +1001,27 @@ if __name__ == "__main__":
     buffer_state = replay_buffer.insert(buffer_state, data)
     return env_state, buffer_state
 
+  @jax.jit
+  def collect_experience(training_state, env_state, key):
+    """Collect transitions without inserting into buffer (for VPG)."""
+    @jax.jit
+    def f(carry, unused_t):
+      env_state, current_key = carry
+      current_key, next_key = jax.random.split(current_key)
+      env_state, transition = actor_step(
+          training_state,
+          env,
+          env_state,
+          current_key,
+          extra_fields=("truncation", "seed"),
+      )
+      return (env_state, next_key), transition
+
+    (env_state, _), data = jax.lax.scan(
+        f, (env_state, key), (), length=args.unroll_length
+    )
+    return env_state, data
+
   def prefill_replay_buffer(training_state, env_state, buffer_state, key):
     @jax.jit
     def f(carry, unused):
@@ -910,266 +1046,532 @@ if __name__ == "__main__":
         length=args.num_prefill_actor_steps,
     )[0]
 
-  @jax.jit
-  def update_actor_and_alpha(transitions, training_state, key):
-    actor_batch_size = args.batch_size
-    transitions = jax.tree_util.tree_map(
-        lambda x: x[:actor_batch_size], transitions
-    )
+  # ============================================================
+  # Algorithm-specific update functions
+  # ============================================================
 
-    def actor_loss(actor_params, critic_params, log_alpha, transitions, key):
-      obs = (
-          transitions.observation
-      )  # expected_shape = batch_size, obs_size + goal_size
-      state = obs[:, : args.obs_dim]
-      future_state = transitions.extras["future_state"]
-      goal = future_state[:, args.goal_start_idx : args.goal_end_idx]
-      observation = jnp.concatenate([state, goal], axis=1)
+  if args.algorithm == "crl":
+    # ---- CRL update functions (original) ----
 
-      means, log_stds = actor.apply(actor_params, observation)
-      stds = jnp.exp(log_stds)
-      x_ts = means + stds * jax.random.normal(
-          key, shape=means.shape, dtype=means.dtype
-      )
-      action = nn.tanh(x_ts)
-      log_prob = jax.scipy.stats.norm.logpdf(x_ts, loc=means, scale=stds)
-      log_prob -= jnp.log((1 - jnp.square(action)) + 1e-6)
-      log_prob = log_prob.sum(-1)  # dimension = B
-
-      sa_encoder_params, g_encoder_params = (
-          critic_params["sa_encoder"],
-          critic_params["g_encoder"],
-      )
-      sa_repr = sa_encoder.apply(sa_encoder_params, state, action)
-      g_repr = g_encoder.apply(g_encoder_params, goal)
-
-      # qf_pi = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1))
-      qf_pi = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1) + 1e-6)
-
-      if args.disable_entropy:
-        actor_loss = -jnp.mean(qf_pi)
-      else:
-        actor_loss = jnp.mean(jnp.exp(log_alpha) * log_prob - (qf_pi))
-
-      return actor_loss, log_prob
-
-    def alpha_loss(alpha_params, log_prob):
-      alpha = jnp.exp(alpha_params["log_alpha"])
-      alpha_loss = alpha * jnp.mean(
-          jax.lax.stop_gradient(-log_prob - target_entropy)
-      )
-      return jnp.mean(alpha_loss)
-
-    (actorloss, log_prob), actor_grad = jax.value_and_grad(
-        actor_loss, has_aux=True
-    )(
-        training_state.actor_state.params,
-        training_state.critic_state.params,
-        training_state.alpha_state.params["log_alpha"],
-        transitions,
-        key,
-    )
-    new_actor_state = training_state.actor_state.apply_gradients(
-        grads=actor_grad
-    )
-
-    alphaloss, alpha_grad = jax.value_and_grad(alpha_loss)(
-        training_state.alpha_state.params, log_prob
-    )
-    new_alpha_state = training_state.alpha_state.apply_gradients(
-        grads=alpha_grad
-    )
-
-    training_state = training_state.replace(
-        actor_state=new_actor_state, alpha_state=new_alpha_state
-    )
-
-    metrics = {
-        "sample_entropy": -log_prob,
-        "actor_loss": actorloss,
-        "alph_aloss": alphaloss,
-        "log_alpha": training_state.alpha_state.params["log_alpha"],
-    }
-
-    return training_state, metrics
-
-  @jax.jit
-  def update_critic(transitions, training_state, key):
-    critic_batch_size = args.batch_size
-    transitions = jax.tree_util.tree_map(
-        lambda x: x[:critic_batch_size], transitions
-    )
-
-    def critic_loss(critic_params, transitions, key):
-      sa_encoder_params, g_encoder_params = (
-          critic_params["sa_encoder"],
-          critic_params["g_encoder"],
-      )
-
-      obs = transitions.observation[:, : args.obs_dim]
-      action = transitions.action
-
-      sa_repr = sa_encoder.apply(sa_encoder_params, obs, action)
-      g_repr = g_encoder.apply(
-          g_encoder_params, transitions.observation[:, args.obs_dim :]
-      )
-
-      # InfoNCE
-      logits = -jnp.sqrt(
-          jnp.sum((sa_repr[:, None, :] - g_repr[None, :, :]) ** 2, axis=-1) + 1e-6
-      )  # shape = BxB
-      critic_loss = -jnp.mean(
-          jnp.diag(logits) - jax.nn.logsumexp(logits, axis=1)
-      )
-
-      # logsumexp regularisation
-      logsumexp = jax.nn.logsumexp(logits + 1e-6, axis=1)
-      critic_loss += args.logsumexp_penalty_coeff * jnp.mean(logsumexp**2)
-
-      I, correct, logits_pos, logits_neg = (
-          jnp.zeros(1),
-          jnp.zeros(1),
-          jnp.zeros(1),
-          jnp.zeros(1),
-      )
-
-      return critic_loss, (logsumexp, I, correct, logits_pos, logits_neg)
-
-    (loss, (logsumexp, I, correct, logits_pos, logits_neg)), grad = (
-        jax.value_and_grad(critic_loss, has_aux=True)(
-            training_state.critic_state.params, transitions, key
-        )
-    )
-    new_critic_state = training_state.critic_state.apply_gradients(grads=grad)
-    training_state = training_state.replace(critic_state=new_critic_state)
-
-    metrics = {
-        "categorical_accuracy": jnp.mean(correct),
-        "logits_pos": logits_pos,
-        "logits_neg": logits_neg,
-        "logsumexp": logsumexp.mean(),
-        "critic_loss": loss,
-    }
-
-    return training_state, metrics
-
-  @jax.jit
-  def sgd_step(carry, transitions):
-    training_state, key = carry
-    (
-        key,
-        critic_key,
-        actor_key,
-    ) = jax.random.split(key, 3)
-
-    training_state, actor_metrics = update_actor_and_alpha(
-        transitions, training_state, actor_key
-    )
-
-    training_state, critic_metrics = update_critic(
-        transitions, training_state, critic_key
-    )
-
-    training_state = training_state.replace(
-        gradient_steps=training_state.gradient_steps + 1
-    )
-
-    metrics = {}
-    metrics.update(actor_metrics)
-    metrics.update(critic_metrics)
-
-    return (
-        training_state,
-        key,
-    ), metrics
-
-  @jax.jit
-  def training_step(training_state, env_state, buffer_state, key, t):
-    (
-        experience_key1,
-        experience_key2,
-        sampling_key,
-        training_key,
-        sgd_batches_key,
-    ) = jax.random.split(key, 5)
-
-    # update buffer
-    env_state, buffer_state = get_experience(
-        training_state,
-        env_state,
-        buffer_state,
-        experience_key1,
-    )
-
-    training_state = training_state.replace(
-        env_steps=training_state.env_steps + args.env_steps_per_actor_step,
-    )
-
-    transitions_list = []
-    for _ in range(args.num_episodes_per_env):
-      buffer_state, new_transitions = replay_buffer.sample(buffer_state)
-      transitions_list.append(new_transitions)
-
-    # Concatenate all sampled transitions
-    transitions = jax.tree_util.tree_map(
-        lambda *arrays: jnp.concatenate(arrays, axis=0), *transitions_list
-    )
-
-    # process transitions for training
-    batch_keys = jax.random.split(
-        sampling_key, transitions.observation.shape[0]
-    )
-    transitions = jax.vmap(
-        TrajectoryUniformSamplingQueue.flatten_crl_fn, in_axes=(None, 0, 0)
-    )(
-        (args.gamma, args.obs_dim, args.goal_start_idx, args.goal_end_idx),
-        transitions,
-        batch_keys,
-    )
-
-    transitions = jax.tree_util.tree_map(
-        lambda x: jnp.reshape(x, (-1,) + x.shape[2:], order="F"),
-        transitions,
-    )
-
-    permutation = jax.random.permutation(
-        experience_key2, len(transitions.observation)
-    )
-    transitions = jax.tree_util.tree_map(lambda x: x[permutation], transitions)
-
-    # I added this code, so as to ensure len(transitions.observation) is divisible by batch_size
-    num_full_batches = len(transitions.observation) // args.batch_size
-    transitions = jax.tree_util.tree_map(
-        lambda x: x[: num_full_batches * args.batch_size], transitions
-    )
-
-    transitions = jax.tree_util.tree_map(
-        lambda x: jnp.reshape(x, (-1, args.batch_size) + x.shape[1:]),
-        transitions,
-    )
-
-    if args.use_all_batches == 0:
-      num_total_batches = transitions.observation.shape[0]
-      selected_indices = jax.random.permutation(
-          sgd_batches_key, num_total_batches
-      )[: args.num_sgd_batches_per_training_step]
+    @jax.jit
+    def update_actor_and_alpha(transitions, training_state, key):
+      actor_batch_size = args.batch_size
       transitions = jax.tree_util.tree_map(
-          lambda x: x[selected_indices], transitions
+          lambda x: x[:actor_batch_size], transitions
       )
 
-    # take actor-step worth of training-step
-    (
-        training_state,
-        _,
-    ), metrics = jax.lax.scan(
-        sgd_step, (training_state, training_key), transitions
-    )
+      def actor_loss(actor_params, critic_params, log_alpha, transitions, key):
+        obs = transitions.observation
+        state = obs[:, : args.obs_dim]
+        future_state = transitions.extras["future_state"]
+        goal = future_state[:, args.goal_start_idx : args.goal_end_idx]
+        observation = jnp.concatenate([state, goal], axis=1)
 
-    return (
-        training_state,
-        env_state,
-        buffer_state,
-    ), metrics
+        means, log_stds = actor.apply(actor_params, observation)
+        stds = jnp.exp(log_stds)
+        x_ts = means + stds * jax.random.normal(
+            key, shape=means.shape, dtype=means.dtype
+        )
+        action = nn.tanh(x_ts)
+        log_prob = jax.scipy.stats.norm.logpdf(x_ts, loc=means, scale=stds)
+        log_prob -= jnp.log((1 - jnp.square(action)) + 1e-6)
+        log_prob = log_prob.sum(-1)
+
+        sa_encoder_params, g_encoder_params = (
+            critic_params["sa_encoder"],
+            critic_params["g_encoder"],
+        )
+        sa_repr = sa_encoder.apply(sa_encoder_params, state, action)
+        g_repr = g_encoder.apply(g_encoder_params, goal)
+        qf_pi = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1) + 1e-6)
+
+        if args.disable_entropy:
+          actor_loss = -jnp.mean(qf_pi)
+        else:
+          actor_loss = jnp.mean(jnp.exp(log_alpha) * log_prob - (qf_pi))
+
+        return actor_loss, log_prob
+
+      def alpha_loss(alpha_params, log_prob):
+        alpha = jnp.exp(alpha_params["log_alpha"])
+        alpha_loss = alpha * jnp.mean(
+            jax.lax.stop_gradient(-log_prob - target_entropy)
+        )
+        return jnp.mean(alpha_loss)
+
+      (actorloss, log_prob), actor_grad = jax.value_and_grad(
+          actor_loss, has_aux=True
+      )(
+          training_state.actor_state.params,
+          training_state.critic_state.params,
+          training_state.alpha_state.params["log_alpha"],
+          transitions,
+          key,
+      )
+      new_actor_state = training_state.actor_state.apply_gradients(
+          grads=actor_grad
+      )
+
+      alphaloss, alpha_grad = jax.value_and_grad(alpha_loss)(
+          training_state.alpha_state.params, log_prob
+      )
+      new_alpha_state = training_state.alpha_state.apply_gradients(
+          grads=alpha_grad
+      )
+
+      training_state = training_state.replace(
+          actor_state=new_actor_state, alpha_state=new_alpha_state
+      )
+
+      metrics = {
+          "sample_entropy": -log_prob,
+          "actor_loss": actorloss,
+          "alpha_loss": alphaloss,
+          "log_alpha": training_state.alpha_state.params["log_alpha"],
+      }
+
+      return training_state, metrics
+
+    @jax.jit
+    def update_critic(transitions, training_state, key):
+      critic_batch_size = args.batch_size
+      transitions = jax.tree_util.tree_map(
+          lambda x: x[:critic_batch_size], transitions
+      )
+
+      def critic_loss(critic_params, transitions, key):
+        sa_encoder_params, g_encoder_params = (
+            critic_params["sa_encoder"],
+            critic_params["g_encoder"],
+        )
+        obs = transitions.observation[:, : args.obs_dim]
+        action = transitions.action
+        sa_repr = sa_encoder.apply(sa_encoder_params, obs, action)
+        g_repr = g_encoder.apply(
+            g_encoder_params, transitions.observation[:, args.obs_dim :]
+        )
+        logits = -jnp.sqrt(
+            jnp.sum((sa_repr[:, None, :] - g_repr[None, :, :]) ** 2, axis=-1) + 1e-6
+        )
+        critic_loss = -jnp.mean(
+            jnp.diag(logits) - jax.nn.logsumexp(logits, axis=1)
+        )
+        logsumexp = jax.nn.logsumexp(logits + 1e-6, axis=1)
+        critic_loss += args.logsumexp_penalty_coeff * jnp.mean(logsumexp**2)
+        I, correct, logits_pos, logits_neg = (
+            jnp.zeros(1), jnp.zeros(1), jnp.zeros(1), jnp.zeros(1),
+        )
+        return critic_loss, (logsumexp, I, correct, logits_pos, logits_neg)
+
+      (loss, (logsumexp, I, correct, logits_pos, logits_neg)), grad = (
+          jax.value_and_grad(critic_loss, has_aux=True)(
+              training_state.critic_state.params, transitions, key
+          )
+      )
+      new_critic_state = training_state.critic_state.apply_gradients(grads=grad)
+      training_state = training_state.replace(critic_state=new_critic_state)
+
+      metrics = {
+          "categorical_accuracy": jnp.mean(correct),
+          "logits_pos": logits_pos,
+          "logits_neg": logits_neg,
+          "logsumexp": logsumexp.mean(),
+          "critic_loss": loss,
+      }
+      return training_state, metrics
+
+    @jax.jit
+    def sgd_step(carry, transitions):
+      training_state, key = carry
+      key, critic_key, actor_key = jax.random.split(key, 3)
+      training_state, actor_metrics = update_actor_and_alpha(
+          transitions, training_state, actor_key
+      )
+      training_state, critic_metrics = update_critic(
+          transitions, training_state, critic_key
+      )
+      training_state = training_state.replace(
+          gradient_steps=training_state.gradient_steps + 1
+      )
+      metrics = {}
+      metrics.update(actor_metrics)
+      metrics.update(critic_metrics)
+      return (training_state, key), metrics
+
+    @jax.jit
+    def training_step(training_state, env_state, buffer_state, key, t):
+      (
+          experience_key1, experience_key2, sampling_key,
+          training_key, sgd_batches_key,
+      ) = jax.random.split(key, 5)
+
+      env_state, buffer_state = get_experience(
+          training_state, env_state, buffer_state, experience_key1,
+      )
+      training_state = training_state.replace(
+          env_steps=training_state.env_steps + args.env_steps_per_actor_step,
+      )
+
+      transitions_list = []
+      for _ in range(args.num_episodes_per_env):
+        buffer_state, new_transitions = replay_buffer.sample(buffer_state)
+        transitions_list.append(new_transitions)
+
+      transitions = jax.tree_util.tree_map(
+          lambda *arrays: jnp.concatenate(arrays, axis=0), *transitions_list
+      )
+
+      batch_keys = jax.random.split(
+          sampling_key, transitions.observation.shape[0]
+      )
+      transitions = jax.vmap(
+          TrajectoryUniformSamplingQueue.flatten_crl_fn, in_axes=(None, 0, 0)
+      )(
+          (args.gamma, args.obs_dim, args.goal_start_idx, args.goal_end_idx),
+          transitions, batch_keys,
+      )
+
+      transitions = jax.tree_util.tree_map(
+          lambda x: jnp.reshape(x, (-1,) + x.shape[2:], order="F"), transitions,
+      )
+
+      permutation = jax.random.permutation(
+          experience_key2, len(transitions.observation)
+      )
+      transitions = jax.tree_util.tree_map(lambda x: x[permutation], transitions)
+
+      num_full_batches = len(transitions.observation) // args.batch_size
+      transitions = jax.tree_util.tree_map(
+          lambda x: x[: num_full_batches * args.batch_size], transitions
+      )
+      transitions = jax.tree_util.tree_map(
+          lambda x: jnp.reshape(x, (-1, args.batch_size) + x.shape[1:]), transitions,
+      )
+
+      if args.use_all_batches == 0:
+        num_total_batches = transitions.observation.shape[0]
+        selected_indices = jax.random.permutation(
+            sgd_batches_key, num_total_batches
+        )[: args.num_sgd_batches_per_training_step]
+        transitions = jax.tree_util.tree_map(
+            lambda x: x[selected_indices], transitions
+        )
+
+      (training_state, _), metrics = jax.lax.scan(
+          sgd_step, (training_state, training_key), transitions
+      )
+
+      return (training_state, env_state, buffer_state), metrics
+
+  elif args.algorithm == "sac":
+    # ---- Standard SAC update functions ----
+
+    @jax.jit
+    def update_actor_and_alpha(transitions, training_state, key):
+      def actor_loss(actor_params, critic_params, log_alpha, transitions, key):
+        obs = transitions.observation
+        means, log_stds = actor.apply(actor_params, obs)
+        stds = jnp.exp(log_stds)
+        x_ts = means + stds * jax.random.normal(
+            key, shape=means.shape, dtype=means.dtype
+        )
+        action = nn.tanh(x_ts)
+        log_prob = jax.scipy.stats.norm.logpdf(x_ts, loc=means, scale=stds)
+        log_prob -= jnp.log((1 - jnp.square(action)) + 1e-6)
+        log_prob = log_prob.sum(-1)
+
+        q1 = q_network1.apply(critic_params["q1"], obs, action)
+        q2 = q_network2.apply(critic_params["q2"], obs, action)
+        q = jnp.minimum(q1, q2)
+
+        alpha = jnp.exp(log_alpha)
+        loss = jnp.mean(alpha * log_prob - q)
+        return loss, log_prob
+
+      def alpha_loss(alpha_params, log_prob):
+        alpha = jnp.exp(alpha_params["log_alpha"])
+        return alpha * jnp.mean(
+            jax.lax.stop_gradient(-log_prob - target_entropy)
+        )
+
+      (actorloss, log_prob), actor_grad = jax.value_and_grad(
+          actor_loss, has_aux=True
+      )(
+          training_state.actor_state.params,
+          training_state.critic_state.params,
+          training_state.alpha_state.params["log_alpha"],
+          transitions, key,
+      )
+      new_actor_state = training_state.actor_state.apply_gradients(
+          grads=actor_grad
+      )
+
+      alphaloss, alpha_grad = jax.value_and_grad(alpha_loss)(
+          training_state.alpha_state.params, log_prob
+      )
+      new_alpha_state = training_state.alpha_state.apply_gradients(
+          grads=alpha_grad
+      )
+
+      training_state = training_state.replace(
+          actor_state=new_actor_state, alpha_state=new_alpha_state
+      )
+
+      metrics = {
+          "sample_entropy": -log_prob,
+          "actor_loss": actorloss,
+          "alpha_loss": alphaloss,
+          "log_alpha": training_state.alpha_state.params["log_alpha"],
+      }
+      return training_state, metrics
+
+    @jax.jit
+    def update_critic(transitions, training_state, key):
+      def critic_loss(critic_params, target_params, actor_params, alpha_params, transitions, key):
+        obs = transitions.observation
+        action = transitions.action
+        reward = transitions.reward
+        discount = transitions.discount
+        next_obs = transitions.extras["next_observation"]
+
+        # Current Q values
+        q1 = q_network1.apply(critic_params["q1"], obs, action)
+        q2 = q_network2.apply(critic_params["q2"], obs, action)
+
+        # Target Q values with next actions from current policy
+        next_means, next_log_stds = actor.apply(actor_params, next_obs)
+        next_stds = jnp.exp(next_log_stds)
+        next_x_t = next_means + next_stds * jax.random.normal(
+            key, shape=next_means.shape, dtype=next_means.dtype
+        )
+        next_action = nn.tanh(next_x_t)
+        next_log_prob = jax.scipy.stats.norm.logpdf(
+            next_x_t, loc=next_means, scale=next_stds
+        )
+        next_log_prob -= jnp.log(1 - jnp.square(next_action) + 1e-6)
+        next_log_prob = next_log_prob.sum(-1)
+
+        target_q1 = q_network1.apply(target_params["q1"], next_obs, next_action)
+        target_q2 = q_network2.apply(target_params["q2"], next_obs, next_action)
+        target_q = jnp.minimum(target_q1, target_q2)
+
+        alpha = jnp.exp(alpha_params["log_alpha"])
+        target_q = target_q - alpha * next_log_prob
+        target = reward + args.gamma * discount * target_q
+        target = jax.lax.stop_gradient(target)
+
+        loss = 0.5 * jnp.mean((q1 - target) ** 2 + (q2 - target) ** 2)
+        return loss, (q1.mean(), q2.mean())
+
+      (loss, (q1_mean, q2_mean)), grad = jax.value_and_grad(
+          critic_loss, has_aux=True
+      )(
+          training_state.critic_state.params,
+          training_state.target_critic_params,
+          training_state.actor_state.params,
+          training_state.alpha_state.params,
+          transitions, key,
+      )
+      new_critic_state = training_state.critic_state.apply_gradients(grads=grad)
+
+      # Soft update target networks
+      new_target_params = jax.tree_util.tree_map(
+          lambda t, o: (1 - args.tau) * t + args.tau * o,
+          training_state.target_critic_params,
+          new_critic_state.params,
+      )
+
+      training_state = training_state.replace(
+          critic_state=new_critic_state,
+          target_critic_params=new_target_params,
+      )
+
+      metrics = {
+          "critic_loss": loss,
+          "q1_mean": q1_mean,
+          "q2_mean": q2_mean,
+      }
+      return training_state, metrics
+
+    @jax.jit
+    def sgd_step(carry, transitions):
+      training_state, key = carry
+      key, critic_key, actor_key = jax.random.split(key, 3)
+      training_state, actor_metrics = update_actor_and_alpha(
+          transitions, training_state, actor_key
+      )
+      training_state, critic_metrics = update_critic(
+          transitions, training_state, critic_key
+      )
+      training_state = training_state.replace(
+          gradient_steps=training_state.gradient_steps + 1
+      )
+      metrics = {}
+      metrics.update(actor_metrics)
+      metrics.update(critic_metrics)
+      return (training_state, key), metrics
+
+    @jax.jit
+    def training_step(training_state, env_state, buffer_state, key, t):
+      (
+          experience_key1, experience_key2, sampling_key,
+          training_key, sgd_batches_key,
+      ) = jax.random.split(key, 5)
+
+      env_state, buffer_state = get_experience(
+          training_state, env_state, buffer_state, experience_key1,
+      )
+      training_state = training_state.replace(
+          env_steps=training_state.env_steps + args.env_steps_per_actor_step,
+      )
+
+      transitions_list = []
+      for _ in range(args.num_episodes_per_env):
+        buffer_state, new_transitions = replay_buffer.sample(buffer_state)
+        transitions_list.append(new_transitions)
+
+      transitions = jax.tree_util.tree_map(
+          lambda *arrays: jnp.concatenate(arrays, axis=0), *transitions_list
+      )
+
+      # Flatten episodes to (s, a, r, s', done) transitions (no goal relabeling)
+      transitions = jax.vmap(TrajectoryUniformSamplingQueue.flatten_sac_fn)(transitions)
+
+      transitions = jax.tree_util.tree_map(
+          lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), transitions,
+      )
+
+      permutation = jax.random.permutation(
+          experience_key2, len(transitions.observation)
+      )
+      transitions = jax.tree_util.tree_map(lambda x: x[permutation], transitions)
+
+      num_full_batches = len(transitions.observation) // args.batch_size
+      transitions = jax.tree_util.tree_map(
+          lambda x: x[: num_full_batches * args.batch_size], transitions
+      )
+      transitions = jax.tree_util.tree_map(
+          lambda x: jnp.reshape(x, (-1, args.batch_size) + x.shape[1:]), transitions,
+      )
+
+      if args.use_all_batches == 0:
+        num_total_batches = transitions.observation.shape[0]
+        selected_indices = jax.random.permutation(
+            sgd_batches_key, num_total_batches
+        )[: args.num_sgd_batches_per_training_step]
+        transitions = jax.tree_util.tree_map(
+            lambda x: x[selected_indices], transitions
+        )
+
+      (training_state, _), metrics = jax.lax.scan(
+          sgd_step, (training_state, training_key), transitions
+      )
+
+      return (training_state, env_state, buffer_state), metrics
+
+  elif args.algorithm == "vpg":
+    # ---- Vanilla Policy Gradient update functions ----
+
+    @jax.jit
+    def update_vpg(transitions, training_state, key):
+      """VPG update using collected on-policy transitions.
+
+      transitions have shape (unroll_length, num_envs, ...).
+      """
+      rewards = transitions.reward      # (T, N)
+      discounts = transitions.discount  # (T, N)
+      obs = transitions.observation     # (T, N, obs_size)
+      actions = transitions.action      # (T, N, action_size)
+
+      # Compute discounted returns with reverse scan
+      def scan_fn(carry, inp):
+        r, d = inp
+        G = r + args.gamma * d * carry
+        return G, G
+
+      _, returns = jax.lax.scan(
+          scan_fn,
+          jnp.zeros(rewards.shape[1]),  # terminal return = 0
+          (rewards[::-1], discounts[::-1]),
+      )
+      returns = returns[::-1]  # (T, N)
+
+      # Flatten (T, N, ...) -> (T*N, ...)
+      flat_obs = obs.reshape(-1, obs.shape[-1])
+      flat_actions = actions.reshape(-1, actions.shape[-1])
+      flat_returns = returns.reshape(-1)
+
+      # Actor loss (REINFORCE with value baseline)
+      def actor_loss(actor_params, value_params, obs, actions, returns, key):
+        means, log_stds = actor.apply(actor_params, obs)
+        stds = jnp.exp(log_stds)
+
+        # Log prob of the actions that were actually taken
+        x_t = jnp.arctanh(jnp.clip(actions, -1 + 1e-6, 1 - 1e-6))
+        log_prob = jax.scipy.stats.norm.logpdf(x_t, loc=means, scale=stds)
+        log_prob -= jnp.log(1 - jnp.square(actions) + 1e-6)
+        log_prob = log_prob.sum(-1)
+
+        values = value_network.apply(value_params, obs)
+        advantages = returns - jax.lax.stop_gradient(values)
+
+        loss = -jnp.mean(log_prob * jax.lax.stop_gradient(advantages))
+        return loss, log_prob
+
+      (a_loss, log_prob), a_grad = jax.value_and_grad(
+          actor_loss, has_aux=True
+      )(
+          training_state.actor_state.params,
+          training_state.critic_state.params,
+          flat_obs, flat_actions, flat_returns, key,
+      )
+      new_actor_state = training_state.actor_state.apply_gradients(grads=a_grad)
+
+      # Value loss
+      def value_loss(value_params, obs, returns):
+        values = value_network.apply(value_params, obs)
+        return jnp.mean((values - returns) ** 2)
+
+      v_loss, v_grad = jax.value_and_grad(value_loss)(
+          training_state.critic_state.params, flat_obs, flat_returns,
+      )
+      new_critic_state = training_state.critic_state.apply_gradients(grads=v_grad)
+
+      training_state = training_state.replace(
+          actor_state=new_actor_state,
+          critic_state=new_critic_state,
+          gradient_steps=training_state.gradient_steps + 1,
+      )
+
+      metrics = {
+          "actor_loss": a_loss,
+          "value_loss": v_loss,
+          "sample_entropy": -log_prob,
+      }
+      return training_state, metrics
+
+    @jax.jit
+    def training_step(training_state, env_state, buffer_state, key, t):
+      experience_key, training_key = jax.random.split(key)
+
+      # Collect on-policy experience (no buffer insertion)
+      env_state, transitions = collect_experience(
+          training_state, env_state, experience_key
+      )
+      training_state = training_state.replace(
+          env_steps=training_state.env_steps + args.env_steps_per_actor_step,
+      )
+
+      # Update with collected data
+      training_state, metrics = update_vpg(
+          transitions, training_state, training_key
+      )
+
+      return (training_state, env_state, buffer_state), metrics
+
+  # ============================================================
+  # Training epoch (shared structure, works for all algorithms)
+  # ============================================================
 
   @jax.jit
   def training_epoch(
@@ -1182,11 +1584,7 @@ if __name__ == "__main__":
     def f(carry, t):
       ts, es, bs, k = carry
       k, train_key = jax.random.split(k, 2)
-      (
-          ts,
-          es,
-          bs,
-      ), metrics = training_step(ts, es, bs, train_key, t)
+      (ts, es, bs), metrics = training_step(ts, es, bs, train_key, t)
       return (ts, es, bs, k), metrics
 
     (training_state, env_state, buffer_state, key), metrics = jax.lax.scan(
@@ -1197,14 +1595,20 @@ if __name__ == "__main__":
         ),
     )
 
-    metrics["buffer_current_size"] = replay_buffer.size(buffer_state)
+    if args.algorithm != "vpg":
+      metrics["buffer_current_size"] = replay_buffer.size(buffer_state)
     return training_state, env_state, buffer_state, metrics
+
+  # ============================================================
+  # Prefill and evaluator setup
+  # ============================================================
 
   key, prefill_key = jax.random.split(key, 2)
 
-  training_state, env_state, buffer_state, _ = prefill_replay_buffer(
-      training_state, env_state, buffer_state, prefill_key
-  )
+  if args.algorithm != "vpg":
+    training_state, env_state, buffer_state, _ = prefill_replay_buffer(
+        training_state, env_state, buffer_state, prefill_key
+    )
 
   if args.eval_actor == 0:
     """Setting up evaluator"""
