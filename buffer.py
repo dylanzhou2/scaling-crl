@@ -266,5 +266,23 @@ class TrajectoryUniformSamplingQueue:
         extras=extras,
     )
 
+  @staticmethod
+  @jax.jit
+  def flatten_sac_fn(transition):
+    """Flatten sampled episodes into (s, a, r, s', done) tuples for standard SAC."""
+    return transition._replace(
+        observation=transition.observation[:-1],
+        action=transition.action[:-1],
+        reward=transition.reward[:-1],
+        discount=transition.discount[:-1],
+        extras={
+            "state_extras": {
+                "truncation": transition.extras["state_extras"]["truncation"][:-1],
+                "seed": transition.extras["state_extras"]["seed"][:-1],
+            },
+            "next_observation": transition.observation[1:],
+        },
+    )
+
   def size(self, buffer_state: ReplayBufferState) -> int:
     return buffer_state.insert_position - buffer_state.sample_position
