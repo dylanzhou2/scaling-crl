@@ -10,10 +10,15 @@ class TidyBotEnv(ArmEnvs):
 
     def __init__(self, backend="mjx", **kwargs):
         super().__init__(backend=backend, **kwargs)
-        # Fix 1: Use link_names to find index instead of body_name2id
         self.eef_index = self.sys.link_names.index("bracelet_link")
-        # Fix 2: Correct attribute name is jnt_range
-        self.arm_joint_range = self.sys.jnt_range[3:10] 
+        # Kinova's joint_1, _3, _5, _7 are continuous-rotation (jnt_range = [-inf, +inf]).
+        # That makes offset = (-inf + inf)/2 = NaN and multiplier = inf in the action
+        # conversion below, which poisons every step from t=0. Substitute [-pi, pi] for
+        # any joint whose mujoco range isn't finite.
+        raw_range = self.sys.jnt_range[3:10]
+        finite_mask = jnp.isfinite(raw_range).all(axis=1, keepdims=True)
+        default_range = jnp.array([-jnp.pi, jnp.pi])[None, :]
+        self.arm_joint_range = jnp.where(finite_mask, raw_range, default_range)
 
     def _get_arm_angles(self, pipeline_state: base.State) -> jax.Array:
         # Return 10 joints (0-2 base, 3-9 arm) for unified control context
