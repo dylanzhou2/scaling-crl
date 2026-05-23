@@ -1,7 +1,11 @@
+from pathlib import Path
+
 from brax.io import mjcf
 from etils import epath
 
-xml_path = epath.Path("/google/src/cloud/dylanzhou/scaling-crl/google3/video/youtube/enforcement/classifiers/ansible/experimental/dylan/scaling-crl/envs/assets/tidybot/stanford_tidybot/tidybot.xml")
+xml_path = epath.Path(
+    str(Path(__file__).parent / "envs/assets/tidybot/stanford_tidybot/tidybot.xml")
+)
 try:
     sys = mjcf.load(xml_path)
     print("Brax actuator count:", sys.nu)

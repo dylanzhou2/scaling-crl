@@ -11,3 +11,4 @@ xm_launch.py
 Dockerfile
 brax_contact_patch.py
 patch_brax.py
+.DS_Store

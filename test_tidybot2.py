@@ -1,7 +1,11 @@
+from pathlib import Path
+
 from brax.io import mjcf
 from etils import epath
 
-xml_path = epath.resource_path("brax") / "/Users/dylanzhou/Documents/Stanford/cs234/scaling-crl/envs/assets/stanford_tidybot2/tidybot.xml" # Or your absolute path
+xml_path = epath.Path(
+    str(Path(__file__).parent / "envs/assets/stanford_tidybot2/tidybot.xml")
+)
 try:
     sys = mjcf.load(xml_path)
     print("Successfully loaded Tidybot MJCF!")
