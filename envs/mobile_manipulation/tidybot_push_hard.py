@@ -53,14 +53,15 @@ class TidyBotPushHard(TidyBotEnv):
     def _get_initial_state(self, rng):
         rng, subkey1, subkey2 = jax.random.split(rng, 3)
         q = self.sys.init_q
-        
+
         # 1. Randomize Cube Position (xy) with larger hard-mode bounds
         cube_q_xy = q[self.cube_q_idx : self.cube_q_idx+2] + \
                     self.cube_noise_scale * jax.random.uniform(subkey1, [2], minval=-1)
         q = q.at[self.cube_q_idx : self.cube_q_idx+2].set(cube_q_xy)
 
-        # 2. Add noise to Arm joints (indices 3-9)
-        arm_q = q[3:10] + self.arm_noise_scale * jax.random.uniform(subkey2, [7], minval=-1)
+        # 2. Pre-position arm near cube height, facing +y toward cube. Same default as push_easy.
+        arm_q_default = jnp.array([-jnp.pi/2, 1.4, jnp.pi, -1.2, 0.0, 0.5, jnp.pi/2])
+        arm_q = arm_q_default + self.arm_noise_scale * jax.random.uniform(subkey2, [7], minval=-1)
         q = q.at[3:10].set(arm_q)
 
         qd = jnp.zeros([self.sys.qd_size()])

@@ -29,7 +29,7 @@ class TidyBotPushEasy(TidyBotEnv):
 
     def _set_environment_attributes(self):
         self.env_name = "tidybot_push_easy"
-        self.episode_length = 50
+        self.episode_length = 500
 
         # Based on q=32 verification:
         # Robot (0-17): Base(3) + Arm(7) + Gripper(8)
@@ -44,21 +44,24 @@ class TidyBotPushEasy(TidyBotEnv):
         self.completion_goal_indices = self.goal_indices
         self.state_dim = 20
 
-        self.arm_noise_scale = 0. #0.05
-        self.cube_noise_scale = 0. #0.1
-        self.goal_noise_scale = 0. #0.1
+        self.arm_noise_scale = 0.
+        self.cube_noise_scale = 0.1
+        self.goal_noise_scale = 0.1
 
     def _get_initial_state(self, rng):
         rng, subkey1, subkey2 = jax.random.split(rng, 3)
         q = self.sys.init_q
-        
+
         # 1. Randomize Cube Position (xy) at index 18
         cube_q_xy = q[self.cube_q_idx : self.cube_q_idx+2] + \
                     self.cube_noise_scale * jax.random.uniform(subkey1, [2], minval=-1)
         q = q.at[self.cube_q_idx : self.cube_q_idx+2].set(cube_q_xy)
 
-        # 2. Add noise to Arm joints (indices 3-9)
-        arm_q = q[3:10] + self.arm_noise_scale * jax.random.uniform(subkey2, [7], minval=-1)
+        # 2. Pre-position arm near cube height (z~0.37m), facing +y toward cube.
+        # j1=-pi/2 rotates arm toward +y; j2/j4 set EEF to z~0.37m, ~0.32m from cube.
+        # Mirrors ArmPushEasy's arm_q_default which positions Panda at z=0.37m, 0.33m from cube.
+        arm_q_default = jnp.array([-jnp.pi/2, 1.4, jnp.pi, -1.2, 0.0, 0.5, jnp.pi/2])
+        arm_q = arm_q_default + self.arm_noise_scale * jax.random.uniform(subkey2, [7], minval=-1)
         q = q.at[3:10].set(arm_q)
 
         qd = jnp.zeros([self.sys.qd_size()])

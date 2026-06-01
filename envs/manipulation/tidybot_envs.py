@@ -11,6 +11,13 @@ class TidyBotEnv(ArmEnvs):
     def __init__(self, backend="mjx", **kwargs):
         super().__init__(backend=backend, **kwargs)
         self.eef_index = self.sys.link_names.index("bracelet_link")
+        # Use incremental (delta) arm control: a zero action HOLDS the current pose.
+        # Absolute control is pathological for the Kinova arm here because all 7 joint
+        # ranges are symmetric about 0 (offset=0), so action 0 -> every joint to angle 0
+        # (arm straight up), yanking it off the reset pose every step. The parent
+        # ArmEnvs.step reads this flag via getattr (default False), so Panda envs are
+        # unaffected. See _convert_action_to_actuator_input_joint_angle's delta branch.
+        self.arm_delta_control = True
         # Kinova's joint_1, _3, _5, _7 are continuous-rotation (jnt_range = [-inf, +inf]).
         # That makes offset = (-inf + inf)/2 = NaN and multiplier = inf in the action
         # conversion below, which poisons every step from t=0. Substitute [-pi, pi] for
