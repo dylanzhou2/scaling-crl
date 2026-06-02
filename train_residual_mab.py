@@ -25,10 +25,36 @@ Usage (arch is auto-read from the checkpoint's sibling *_args.pkl):
     --env_id tidybot_push_easy \
     --exp_name mab_d4_eps0.3
 
-Ablations:
+Ablations (--barrier_type, mirrors the project's CRL-MAB standard ablation ladder):
+
+  none                    # unconstrained residual; tests whether residuals can
+                          # hack the frozen contrastive critic when no barrier
+                          # is imposed at all.
+  box                     # per-dim tanh box (LATENT-style lambda*sigma*tanh(z))
+                          # in the actor's per-dim log_std metric.
+  ball  (default)         # diagonal Mahalanobis: L2 ball of radius eps in
+                          # whitened (sigma_eff) coords. Sigma = actor's per-dim
+                          # learned action std. This is the action-space MAB.
+  euclidean               # L2 ball of radius eps in raw action space (Sigma = I).
+                          # Isolates the *Mahalanobis* effect from the "constrained
+                          # at all" effect by stripping per-dim sigma scaling.
+  isotropic               # L2 ball with SCALAR sigma = mean(sigma_eff) over dims.
+                          # Isolates whether per-dim sigma weighting matters
+                          # beyond just having an adaptive overall scale.
+  embedding_ball          # ball (action space) + Lagrangian soft penalty on
+                          # ||phi(s, a_corrected) - phi(s, a_base)||_2 > eps_phi.
+                          # Embedding-space barrier with Sigma_phi = I.
+  embedding_mahalanobis   # ball (action space) + Lagrangian soft penalty on
+                          # whitened ||delta phi||_{Sigma_phi^-1}, with diagonal
+                          # Sigma_phi estimated from the current minibatch's
+                          # base-action embeddings. Embedding-space MAB (the
+                          # theory-justified variant per the project's theory plan).
+
+Other ablation knobs:
   --epsilon 0.0            # barrier shut -> corrected == base (sanity / baseline)
-  --barrier_type box       # per-dim box instead of L2 ball
-  --sigma_floor 0.0        # pure policy-covariance metric, no floor
+  --sigma_floor 0.0        # pure policy-covariance metric, no floor on sigma
+  --embedding_epsilon X    # radius of soft-constraint ball in critic embedding space
+  --embedding_penalty X    # Lagrangian coefficient for embedding-space penalty
 """
 
 from dataclasses import dataclass
@@ -101,7 +127,17 @@ class ResArgs:
   """Floor on per-dim action std used in the metric, so the barrier keeps
   authority when the policy's std collapses late in training."""
   barrier_type: str = "ball"
-  """'ball' = true L2 Mahalanobis ball (project), 'box' = per-dim tanh box."""
+  """One of: 'none' (unconstrained), 'box' (per-dim tanh), 'ball' (default,
+  action-space diagonal Mahalanobis), 'euclidean' (action-space L2 with Sigma=I),
+  'isotropic' (action-space L2 with scalar sigma), 'embedding_ball' (ball +
+  soft phi-space L2 penalty), 'embedding_mahalanobis' (ball + soft phi-space
+  diagonal Mahalanobis penalty). See top-of-file docstring for full semantics."""
+  embedding_epsilon: float = 1.0
+  """Radius (in phi-space units) of the embedding-space soft constraint.
+  Used only for barrier_type in {'embedding_ball', 'embedding_mahalanobis'}."""
+  embedding_penalty: float = 1.0
+  """Lagrangian coefficient for the embedding-space hinge penalty.
+  loss += embedding_penalty * mean( max(0, ||delta phi||^2 - embedding_epsilon^2) )."""
   residual_width: int = 256
   residual_depth: int = 4
   residual_lr: float = 3e-4
@@ -314,20 +350,56 @@ def main(args):
 
   eps = args.epsilon
   sigma_floor = args.sigma_floor
-  ball = args.barrier_type == "ball"
+  barrier_type = args.barrier_type
+  valid_barrier_types = (
+      "none", "box", "ball", "euclidean", "isotropic",
+      "embedding_ball", "embedding_mahalanobis",
+  )
+  if barrier_type not in valid_barrier_types:
+    raise ValueError(
+        f"--barrier_type={barrier_type!r} not recognised; "
+        f"choose from {valid_barrier_types}"
+    )
+  embedding_eps = args.embedding_epsilon
+  embedding_pen = args.embedding_penalty
+  emb_variant = barrier_type.startswith("embedding")
 
   def barrier_residual(res_params, obs):
-    """Returns (mean, std, dx, u) with ||u|| <= epsilon (Mahalanobis ball)."""
+    """Compute (mean, std, dx, u) for the chosen barrier_type.
+
+    Semantics of dx (added to mean pre-tanh) and u (whitened residual; the L2
+    reg term penalises ||u||^2):
+      none         : dx = raw,           u = raw       (unconstrained)
+      box          : dx = sigma_eff * u, u = eps * tanh(raw)             (per-dim box)
+      ball         : dx = sigma_eff * u, u = eps * raw / max(1, ||raw||) (diag Mahalanobis)
+      euclidean    : dx = u,             u = eps * raw / max(1, ||raw||) (Sigma = I)
+      isotropic    : dx = sigma_s * u,   u = eps * raw / max(1, ||raw||) (scalar sigma_s)
+      embedding_*  : action-space dx as in 'ball'; constraint enforced softly
+                     in the loss via a hinge on ||delta phi||.
+    """
     mean, log_std = actor.apply(actor_params, obs)  # frozen base
     std = jnp.exp(log_std)
     sigma_eff = jnp.maximum(std, sigma_floor)
     raw = residual.apply(res_params, obs)
-    if ball:
-      norm = jnp.sqrt(jnp.sum(raw ** 2, axis=-1, keepdims=True) + 1e-8)
-      u = eps * raw / jnp.maximum(1.0, norm)  # project into L2 ball of radius eps
+
+    if barrier_type == "none":
+      dx = raw
+      u = raw
+    elif barrier_type == "box":
+      u = eps * jnp.tanh(raw)
+      dx = sigma_eff * u
     else:
-      u = eps * jnp.tanh(raw)  # per-dim box of half-width eps
-    dx = sigma_eff * u  # de-whiten: dx in pre-tanh action coords
+      # All ball-like barriers share the same whitened L2 projection of `raw`.
+      norm = jnp.sqrt(jnp.sum(raw ** 2, axis=-1, keepdims=True) + 1e-8)
+      u = eps * raw / jnp.maximum(1.0, norm)
+      if barrier_type == "euclidean":
+        dx = u                                       # Sigma = I (action space)
+      elif barrier_type == "isotropic":
+        sigma_scalar = jnp.mean(sigma_eff, axis=-1, keepdims=True)
+        dx = sigma_scalar * u                        # scalar per-state sigma
+      else:
+        # 'ball' (diagonal Mahalanobis) or 'embedding_*' (action-space part).
+        dx = sigma_eff * u
     return mean, std, dx, u
 
   def corrected_det(res_params, obs):
@@ -346,14 +418,39 @@ def main(args):
       g_repr = g_encoder.apply(critic_params["g_encoder"], goal)
       q = -jnp.sqrt(jnp.sum((sa_repr - g_repr) ** 2, axis=-1) + 1e-6)
       loss = -jnp.mean(q) + args.residual_reg * jnp.mean(jnp.sum(u ** 2, axis=-1))
-      dx_norm = jnp.mean(jnp.sqrt(jnp.sum(dx ** 2, axis=-1) + 1e-8))
-      return loss, (jnp.mean(q), dx_norm)
 
-    (loss, (q, dx_norm)), grad = jax.value_and_grad(loss_fn, has_aux=True)(
-        res_state.params
-    )
+      # Embedding-space soft constraint for embedding_* barrier types.
+      # phi(s, .) has no dependence on res_params via base_action (it uses the
+      # frozen actor mean), so the gradient flows only through sa_repr.
+      if emb_variant:
+        base_action = jnp.tanh(mean)
+        sa_base = sa_encoder.apply(
+            critic_params["sa_encoder"], state, base_action
+        )
+        delta_phi = sa_repr - sa_base
+        if barrier_type == "embedding_mahalanobis":
+          # Diagonal Sigma_phi estimated from this batch's base embeddings.
+          phi_centered = sa_base - jnp.mean(sa_base, axis=0, keepdims=True)
+          phi_var = jnp.mean(phi_centered ** 2, axis=0, keepdims=True) + 1e-6
+          delta_phi_eff = delta_phi / jnp.sqrt(phi_var)
+        else:  # embedding_ball: Sigma_phi = I
+          delta_phi_eff = delta_phi
+        phi_dist_sq = jnp.sum(delta_phi_eff ** 2, axis=-1)
+        # Hinge: only penalise when ||delta phi||^2 exceeds embedding_eps^2.
+        phi_violation = jnp.maximum(phi_dist_sq - embedding_eps ** 2, 0.0)
+        loss = loss + embedding_pen * jnp.mean(phi_violation)
+        phi_dist = jnp.mean(jnp.sqrt(phi_dist_sq + 1e-8))
+      else:
+        phi_dist = jnp.asarray(0.0, dtype=dx.dtype)
+
+      dx_norm = jnp.mean(jnp.sqrt(jnp.sum(dx ** 2, axis=-1) + 1e-8))
+      return loss, (jnp.mean(q), dx_norm, phi_dist)
+
+    (loss, (q, dx_norm, phi_dist)), grad = jax.value_and_grad(
+        loss_fn, has_aux=True
+    )(res_state.params)
     res_state = res_state.apply_gradients(grads=grad)
-    return res_state, loss, q, dx_norm
+    return res_state, loss, q, dx_norm, phi_dist
 
   # ---- state collection: roll out the corrected policy (with base exploration) ----
   explore = bool(args.collect_stochastic)
@@ -428,17 +525,21 @@ def main(args):
     obs_data = jax.lax.stop_gradient(obs_data)
     m = obs_data.shape[0]
 
-    last_loss = last_q = last_dx = 0.0
+    last_loss = last_q = last_dx = last_phi = 0.0
     for _ in range(args.grad_steps_per_iter):
       key, ik = jax.random.split(key)
       idx = jax.random.randint(ik, (args.batch_size,), 0, m)
       obs_batch = obs_data[idx]
-      res_state, loss, q, dx_norm = update(res_state, obs_batch)
-      last_loss, last_q, last_dx = float(loss), float(q), float(dx_norm)
+      res_state, loss, q, dx_norm, phi_dist = update(res_state, obs_batch)
+      last_loss = float(loss)
+      last_q = float(q)
+      last_dx = float(dx_norm)
+      last_phi = float(phi_dist)
 
+    phi_str = f" |dphi|={last_phi:.4f}" if emb_variant else ""
     print(
         f"[train it={it:>3}] collected={m} loss={last_loss:+.4f} "
-        f"Q={last_q:+.4f} |dx|={last_dx:.4f}",
+        f"Q={last_q:+.4f} |dx|={last_dx:.4f}{phi_str}",
         flush=True,
     )
     if args.eval_every and it % args.eval_every == 0:
@@ -461,6 +562,8 @@ def main(args):
           "epsilon": args.epsilon,
           "sigma_floor": args.sigma_floor,
           "barrier_type": args.barrier_type,
+          "embedding_epsilon": args.embedding_epsilon,
+          "embedding_penalty": args.embedding_penalty,
           "residual_width": args.residual_width,
           "residual_depth": args.residual_depth,
           "arch": cfg,
