@@ -242,6 +242,10 @@ def make_env(env_id, **env_kwargs):
     from envs.manipulation.arm_push_shifted import ArmPushShifted
 
     return ArmPushShifted(backend="mjx")
+  elif env_id == "arm_binpick_easy":
+    from envs.manipulation.arm_binpick_easy import ArmBinpickEasy
+
+    return ArmBinpickEasy(backend="mjx")
   elif env_id == "arm_push_aside":
     from envs.manipulation.arm_push_aside import ArmPushAside
 
