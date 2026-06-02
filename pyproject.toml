@@ -6,13 +6,9 @@ readme = "README.md"
 requires-python = "==3.10.*"
 dependencies = [
     "numpy==1.26.4",
-    # Blackwell (RTX 5090, sm_120) requires jaxlib >= 0.5.1 built against CUDA 12.8.
-    # Uses the modern plugin model: jax[cuda12] pulls jax-cuda12-plugin/-pjrt + bundled
-    # CUDA 12.8/12.9 libs (incl. ptxas that supports sm_120). Bumped from 0.4.23 on 2026-05-30.
-    "jax[cuda12]==0.5.3; platform_system == 'Linux'",
-    "jax==0.5.3; platform_system != 'Linux'",
-    "jaxlib==0.5.3",
-    "flax==0.10.6",
+    "jax[cuda12]==0.4.38; platform_system == 'Linux'",
+    "jax==0.4.38; platform_system != 'Linux'",
+    "flax>=0.9.0,<0.10.0",
     "tyro",
     "wandb==0.17.9",
     "wandb-osh==1.2.2",

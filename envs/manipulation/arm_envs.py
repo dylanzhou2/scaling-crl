@@ -73,7 +73,7 @@ class ArmEnvs(PipelineEnv):
     else:
       arm_angles = self._get_arm_angles(pipeline_state0)
       action = self._convert_action_to_actuator_input_joint_angle(
-          action, arm_angles, delta_control=False
+          action, arm_angles, delta_control=getattr(self, "arm_delta_control", False)
       )
 
     pipeline_state = self.pipeline_step(pipeline_state0, action)
@@ -87,6 +87,7 @@ class ArmEnvs(PipelineEnv):
     # Compute variables for state update, including observation and goal/reward
     timestep = state.info["timestep"] + 1 / self.episode_length
     obs = self._get_obs(pipeline_state, state.info["goal"], timestep)
+    obs = jnp.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
     success, success_easy, success_hard = self._compute_goal_completion(
         obs, state.info["goal"]
