@@ -180,6 +180,18 @@ def make_env(env_id):
     from envs.manipulation.arm_push_hard import ArmPushHard
 
     return ArmPushHard(backend="mjx")
+  elif env_id == "arm_push_sphere":
+    from envs.manipulation.arm_push_sphere import ArmPushSphere
+
+    return ArmPushSphere(backend="mjx")
+  elif env_id == "arm_push_bar":
+    from envs.manipulation.arm_push_bar import ArmPushBar
+
+    return ArmPushBar(backend="mjx")
+  elif env_id == "arm_push_shifted":
+    from envs.manipulation.arm_push_shifted import ArmPushShifted
+
+    return ArmPushShifted(backend="mjx")
   else:
     raise NotImplementedError(
         f"make_env: env_id '{env_id}' not wired into train_residual_mab.py. "
@@ -474,6 +486,7 @@ def main(args):
       f"delta={corr_succ - base_succ:+.3f}",
       flush=True,
   )
+  return base_succ, corr_succ
 
 
 if __name__ == "__main__":

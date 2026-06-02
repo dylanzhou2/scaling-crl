@@ -13,6 +13,16 @@ barrier hyperparameters (epsilon / sigma_floor / barrier_type) are all read from
 the residual pkl's `meta`, so only `--residual_path` is required. Use
 `--no_residual` to render the frozen base policy instead of the corrected one
 (handy for a side-by-side base-vs-corrected comparison).
+
+Cross-object transfer: because arm_push_{hard,sphere,bar} share the same obs
+(20-dim) and action (5-dim) spaces, a policy trained on one object can be rendered
+on another by overriding --env_id. E.g. an arm_push_hard (cube) checkpoint on the
+bar env:
+    uv run run_rollout.py --checkpoint_path .../arm_push_hard..._final.pkl \\
+        --env_id arm_push_bar --out rollout_bar.html
+
+The env_id is resolved by make_env() in train_residual_mab.py; supported ids
+include arm_push_{easy,hard,sphere,bar} and tidybot_push_{easy,hard}.
 """
 
 import argparse

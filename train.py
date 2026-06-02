@@ -641,6 +641,42 @@ if __name__ == "__main__":
       args.goal_start_idx = 0
       args.goal_end_idx = 3
 
+    elif env_id == "arm_push_sphere":
+      from envs.manipulation.arm_push_sphere import ArmPushSphere
+
+      print("ARM PUSH SPHERE ENV")
+      env = ArmPushSphere(
+          backend="mjx",
+      )
+
+      args.obs_dim = 17
+      args.goal_start_idx = 0
+      args.goal_end_idx = 3
+
+    elif env_id == "arm_push_bar":
+      from envs.manipulation.arm_push_bar import ArmPushBar
+
+      print("ARM PUSH BAR ENV")
+      env = ArmPushBar(
+          backend="mjx",
+      )
+
+      args.obs_dim = 17
+      args.goal_start_idx = 0
+      args.goal_end_idx = 3
+
+    elif env_id == "arm_push_shifted":
+      from envs.manipulation.arm_push_shifted import ArmPushShifted
+
+      print("ARM PUSH SHIFTED ENV")
+      env = ArmPushShifted(
+          backend="mjx",
+      )
+
+      args.obs_dim = 17
+      args.goal_start_idx = 0
+      args.goal_end_idx = 3
+
     elif env_id == "tidybot_maze":
       from envs.mobile_manipulation.tidybot_maze import TidyBotMaze
       print("TIDYBOT MAZE ENV")
