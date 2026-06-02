@@ -120,6 +120,16 @@ class ResArgs:
   use_relu: Optional[int] = None
   episode_length: Optional[int] = None
 
+  # --- arm_push_aside env knobs (the OOD-offset sweep variable) ---
+  aside_offset: float = 0.15
+  """Rightward goal shift along the lateral axis: goal_x = 0.25 + aside_offset.
+  In-distribution for offset <= 0.25 (red bin edge); OOD beyond. Only used by
+  --env_id arm_push_aside."""
+  zone_radius: float = 0.12
+  """Region success radius for arm_push_aside (looser than the 0.1 m coordinate bar)."""
+  aside_axis: int = 0
+  """Lateral axis for the aside offset (0=x/left-right, 1=y/depth)."""
+
   # --- MAB residual hyperparameters ---
   epsilon: float = 0.3
   """Mahalanobis ball radius (in whitened pre-tanh units). 0 => no correction."""
@@ -197,9 +207,13 @@ class ResidualActor(nn.Module):
     return raw
 
 
-def make_env(env_id):
+def make_env(env_id, **env_kwargs):
   """Construct the (unwrapped) brax env. Mirrors train.py's dispatch for the
-  envs this residual stage targets; extend here if you add more."""
+  envs this residual stage targets; extend here if you add more.
+
+  env_kwargs are forwarded only to envs that accept them (currently
+  arm_push_aside); other branches ignore them.
+  """
   if env_id == "tidybot_push_easy":
     from envs.mobile_manipulation.tidybot_push_easy import TidyBotPushEasy
 
@@ -228,6 +242,15 @@ def make_env(env_id):
     from envs.manipulation.arm_push_shifted import ArmPushShifted
 
     return ArmPushShifted(backend="mjx")
+  elif env_id == "arm_push_aside":
+    from envs.manipulation.arm_push_aside import ArmPushAside
+
+    return ArmPushAside(
+        backend="mjx",
+        aside_offset=env_kwargs.get("aside_offset", 0.15),
+        zone_radius=env_kwargs.get("zone_radius", 0.12),
+        aside_axis=env_kwargs.get("aside_axis", 0),
+    )
   else:
     raise NotImplementedError(
         f"make_env: env_id '{env_id}' not wired into train_residual_mab.py. "
@@ -292,7 +315,12 @@ def main(args):
   print(f"[arch] {cfg}", flush=True)
 
   # ---- env ----
-  env = make_env(args.env_id)
+  env = make_env(
+      args.env_id,
+      aside_offset=args.aside_offset,
+      zone_radius=args.zone_radius,
+      aside_axis=args.aside_axis,
+  )
   env = envs.training.wrap(env, episode_length=cfg["episode_length"])
   env.step = jax.jit(env.step)
   reset = jax.jit(env.reset)
@@ -571,6 +599,9 @@ def main(args):
       "meta": {
           "env_id": args.env_id,
           "checkpoint_path": args.checkpoint_path,
+          "aside_offset": args.aside_offset,
+          "zone_radius": args.zone_radius,
+          "aside_axis": args.aside_axis,
           "epsilon": args.epsilon,
           "sigma_floor": args.sigma_floor,
           "barrier_type": args.barrier_type,

@@ -59,6 +59,12 @@ def parse_args():
   p.add_argument("--steps", type=int, default=1000, help="Max rollout steps.")
   p.add_argument("--seed", type=int, default=0, help="Reset PRNG seed.")
   p.add_argument("--out", default="rollout.html", help="Output HTML path.")
+  # arm_push_aside knobs. Default None -> use the residual meta if present, else
+  # the env's own defaults. Provide explicitly to render a plain checkpoint on a
+  # specific OOD offset.
+  p.add_argument("--aside_offset", type=float, default=None)
+  p.add_argument("--zone_radius", type=float, default=None)
+  p.add_argument("--aside_axis", type=int, default=None)
   return p.parse_args()
 
 
@@ -102,7 +108,23 @@ def main():
   # ------------------------------------------------------------------
   # Environment (unwrapped, so pipeline_state is available for rendering)
   # ------------------------------------------------------------------
-  env = make_env(env_id)
+  # Forward arm_push_aside knobs: CLI override > residual meta > env default.
+  def _pick(cli_val, key, default):
+    if cli_val is not None:
+      return cli_val
+    if meta is not None and key in meta:
+      return meta[key]
+    return default
+
+  env_kwargs = {}
+  if env_id == "arm_push_aside":
+    env_kwargs = dict(
+        aside_offset=_pick(args.aside_offset, "aside_offset", 0.15),
+        zone_radius=_pick(args.zone_radius, "zone_radius", 0.12),
+        aside_axis=_pick(args.aside_axis, "aside_axis", 0),
+    )
+
+  env = make_env(env_id, **env_kwargs)
   action_size = env.action_size
   obs_size = env.observation_size
   print(f"[env] {env_id} obs_size={obs_size} action_size={action_size}")
