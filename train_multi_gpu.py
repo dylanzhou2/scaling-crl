@@ -594,6 +594,13 @@ if __name__ == "__main__":
             args.obs_dim = 20
             args.goal_start_idx = 10
             args.goal_end_idx = 13
+        elif env_id == "tidybot_push_aside":
+            from envs.mobile_manipulation.tidybot_push_aside import TidyBotPushAside
+            print("TIDYBOT PUSH ASIDE ENV (frozen base, eased)")
+            env = TidyBotPushAside(backend="mjx")
+            args.obs_dim = 20
+            args.goal_start_idx = 10
+            args.goal_end_idx = 12
         else:
             raise NotImplementedError
 

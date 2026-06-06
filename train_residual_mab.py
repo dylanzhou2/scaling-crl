@@ -255,6 +255,15 @@ def make_env(env_id, **env_kwargs):
         zone_radius=env_kwargs.get("zone_radius", 0.12),
         aside_axis=env_kwargs.get("aside_axis", 0),
     )
+  elif env_id == "tidybot_push_aside":
+    from envs.mobile_manipulation.tidybot_push_aside import TidyBotPushAside
+
+    return TidyBotPushAside(
+        backend="mjx",
+        aside_offset=env_kwargs.get("aside_offset", 0.2),
+        zone_radius=env_kwargs.get("zone_radius", 0.1),
+        aside_axis=env_kwargs.get("aside_axis", 0),
+    )
   else:
     raise NotImplementedError(
         f"make_env: env_id '{env_id}' not wired into train_residual_mab.py. "

@@ -8,7 +8,16 @@ class TidyBotEnv(ArmEnvs):
     Base class for Tidybot (Mobile Base + Kinova Gen3 + Robotiq 2f-85).
     """
 
-    def __init__(self, backend="mjx", **kwargs):
+    def __init__(self, backend="mjx", base_scale=0.0, gripper_lock=None, **kwargs):
+        # base_scale gates the mobile base: 0.0 freezes it (target held at the
+        # current base position each step), so arm-only primitives like push/pick
+        # are learnable; >0 (e.g. 0.2) makes it mobile for navigate/hallway and for
+        # bounded base corrections at composition time. gripper_lock, when set,
+        # holds the gripper at a constant ctrl value (e.g. closed for a pure
+        # non-prehensile pusher) instead of letting action[10] drive it. Both are
+        # captured here as named params so they are NOT forwarded to brax via kwargs.
+        self.base_scale = base_scale
+        self.gripper_lock = gripper_lock
         super().__init__(backend=backend, **kwargs)
         self.eef_index = self.sys.link_names.index("bracelet_link")
         # Use incremental (delta) arm control: a zero action HOLDS the current pose.
@@ -36,10 +45,10 @@ class TidyBotEnv(ArmEnvs):
     ) -> jax.Array:
         action = jnp.clip(action, -1.0, 1.0)
 
-        # 1. Base Actuators (0, 1, 2)
-        base_current = arm_angles[:3] 
-        # base_action = base_current + action[:3] * 0.2
-        base_action = base_current + action[:3] * 0.0 # turn off base movement
+        # 1. Base Actuators (0, 1, 2). base_scale=0.0 freezes the base (target held
+        # at current position); >0 makes it mobile. Set via the base_scale kwarg.
+        base_current = arm_angles[:3]
+        base_action = base_current + action[:3] * self.base_scale
 
         # 2. Arm Actuators (3-9)
         arm_action_raw = action[3:10]
@@ -52,8 +61,12 @@ class TidyBotEnv(ArmEnvs):
 
         arm_action = offset + arm_action_raw * multiplier
 
-        # 3. Gripper Actuator (10)
-        gripper_action = jnp.where(action[10] > 0, 0.0, 255.0)[None]
+        # 3. Gripper Actuator (10). When gripper_lock is set, hold a constant ctrl
+        # value (e.g. closed pusher); otherwise action[10] drives open/close.
+        if self.gripper_lock is None:
+            gripper_action = jnp.where(action[10] > 0, 0.0, 255.0)[None]
+        else:
+            gripper_action = jnp.array([self.gripper_lock], dtype=base_action.dtype)
 
         return jnp.concatenate([base_action, arm_action, gripper_action])
 

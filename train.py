@@ -719,6 +719,18 @@ if __name__ == "__main__":
       # These indices point to the cube's position within the 20-dim state vector.
       args.goal_start_idx = 10
       args.goal_end_idx = 13
+
+    elif env_id == "tidybot_push_aside":
+      from envs.mobile_manipulation.tidybot_push_aside import TidyBotPushAside
+      print("TIDYBOT PUSH ASIDE ENV (frozen base, eased)")
+
+      env = TidyBotPushAside(backend="mjx")
+
+      # State: [base(3), arm(7), cube(3), eef(3), eef_vel(3), finger(1)] = 20
+      args.obs_dim = 20
+      # Goal = cube xy target (2-dim): obs[10:12].
+      args.goal_start_idx = 10
+      args.goal_end_idx = 12
     else:
       raise NotImplementedError
 
