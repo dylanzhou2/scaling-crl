@@ -264,6 +264,14 @@ def make_env(env_id, **env_kwargs):
         zone_radius=env_kwargs.get("zone_radius", 0.1),
         aside_axis=env_kwargs.get("aside_axis", 0),
     )
+  elif env_id == "tidybot_navigate":
+    from envs.mobile_manipulation.tidybot_navigate import TidyBotNavigate
+
+    return TidyBotNavigate(backend="mjx")
+  elif env_id == "tidybot_hallway":
+    from envs.mobile_manipulation.tidybot_hallway import TidyBotHallway
+
+    return TidyBotHallway(backend="mjx")
   else:
     raise NotImplementedError(
         f"make_env: env_id '{env_id}' not wired into train_residual_mab.py. "

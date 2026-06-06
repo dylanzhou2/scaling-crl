@@ -601,6 +601,20 @@ if __name__ == "__main__":
             args.obs_dim = 20
             args.goal_start_idx = 10
             args.goal_end_idx = 12
+        elif env_id == "tidybot_navigate":
+            from envs.mobile_manipulation.tidybot_navigate import TidyBotNavigate
+            print("TIDYBOT NAVIGATE ENV (base-only, mobile)")
+            env = TidyBotNavigate(backend="mjx")
+            args.obs_dim = 20
+            args.goal_start_idx = 0
+            args.goal_end_idx = 2
+        elif env_id == "tidybot_hallway":
+            from envs.mobile_manipulation.tidybot_hallway import TidyBotHallway
+            print("TIDYBOT HALLWAY ENV (composite; mobile base)")
+            env = TidyBotHallway(backend="mjx")
+            args.obs_dim = 20
+            args.goal_start_idx = 0
+            args.goal_end_idx = 2
         else:
             raise NotImplementedError
 
