@@ -38,7 +38,8 @@ class TidyBotEnv(ArmEnvs):
 
         # 1. Base Actuators (0, 1, 2)
         base_current = arm_angles[:3] 
-        base_action = base_current + action[:3] * 0.2
+        # base_action = base_current + action[:3] * 0.2
+        base_action = base_current + action[:3] * 0.0 # turn off base movement
 
         # 2. Arm Actuators (3-9)
         arm_action_raw = action[3:10]

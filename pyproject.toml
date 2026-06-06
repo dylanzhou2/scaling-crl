@@ -6,10 +6,15 @@ readme = "README.md"
 requires-python = "==3.10.*"
 dependencies = [
     "numpy==1.26.4",
-    "jax[cuda12]==0.5.3; sys_platform == 'linux'",
-    "jax==0.5.3; sys_platform != 'linux'",
-    "jaxlib==0.5.3",
-    "flax==0.10.6",
+    ### for workstation
+    # "jax[cuda12]==0.5.3; sys_platform == 'linux'",
+    # "jax==0.5.3; sys_platform != 'linux'",
+    # "jaxlib==0.5.3",
+    # "flax==0.10.6",
+    ### for cluster
+    "jax[cuda12]==0.4.38; platform_system == 'Linux'",
+    "jax==0.4.38; platform_system != 'Linux'",
+    "flax>=0.9.0,<0.11.0",
     "tyro",
     "wandb==0.17.9",
     "wandb-osh==1.2.2",
