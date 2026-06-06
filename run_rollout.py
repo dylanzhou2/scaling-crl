@@ -59,6 +59,11 @@ def parse_args():
   p.add_argument("--steps", type=int, default=1000, help="Max rollout steps.")
   p.add_argument("--seed", type=int, default=0, help="Reset PRNG seed.")
   p.add_argument("--out", default="rollout.html", help="Output HTML path.")
+  p.add_argument(
+      "--freeze_base", action="store_true",
+      help="Zero the 3 base action dims each step so the mobile base holds its "
+           "position (base_action = base_current + 0). Tidybot envs only; useful "
+           "for inspecting arm-only behavior or matching a base-frozen training run.")
   # arm_push_aside knobs. Default None -> use the residual meta if present, else
   # the env's own defaults. Provide explicitly to render a plain checkpoint on a
   # specific OOD offset.
@@ -187,9 +192,14 @@ def main():
   rollout_states = []
   total_reward = 0.0
 
+  if args.freeze_base:
+    print("[base] FROZEN — base action dims (0,1,2) zeroed each step.")
+
   for _ in range(args.steps):
     obs = jnp.expand_dims(env_state.obs, axis=0)
     action = policy(obs)[0]
+    if args.freeze_base:
+      action = action.at[:3].set(0.0)
     env_state = env_step(env_state, action)
     rollout_states.append(env_state.pipeline_state)
     total_reward += env_state.reward.item()
