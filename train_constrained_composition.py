@@ -60,6 +60,7 @@ import tyro
 
 from train import Actor, residual_block, load_params, save_params, Args  # noqa: F401
 from train_residual_mab import make_env
+from envs.scripted_controllers import CONTROLLERS as SCRIPTED_CONTROLLERS
 
 # Let the unpickler resolve `__main__.Args` for the primitives' sibling args.pkl.
 import sys as _sys
@@ -74,6 +75,12 @@ class CompArgs:
     # --- primitives (parallel lists; checkpoints unused when --dry_run) ---
     primitive_checkpoints: Tuple[str, ...] = ()
     primitive_env_ids: Tuple[str, ...] = ("tidybot_navigate", "tidybot_push_aside")
+    primitive_kind: Tuple[str, ...] = ("scripted", "scripted")
+    """Per-slot ball source aligned to primitive_env_ids: 'scripted' (controller +
+    fitted/fixed Sigma) or 'crl' (frozen actor mean + learned std)."""
+    skill_ball_paths: Tuple[str, ...] = ()
+    """Per-slot fitted-Sigma pkl from collect_scripted_skill_data.py (scripted
+    slots). Empty/missing => fixed-Sigma fallback (also used for --dry_run)."""
     # --- composite task env ---
     env_id: str = "tidybot_hallway"
     state_dim: int = 20  # shared TidyBot state width (obs minus the goal tail)
@@ -203,43 +210,74 @@ def main(args):
     print(f"[env] {args.env_id} obs={obs_size} act={action_size} "
           f"n_primitives={n_prim} barrier={args.barrier_type}", flush=True)
 
-    # ---- frozen primitives (real checkpoints, or random dummies for --dry_run) ----
-    primitives = []  # list of (actor, params, goal_fn)
-    for i, eid in enumerate(args.primitive_env_ids):
-        goal_fn = goal_fns[eid]
-        if args.dry_run:
-            actor = Actor(action_size=action_size, network_width=args.net_width,
-                          network_depth=4, skip_connections=0, use_relu=args.use_relu)
-            key, kp = jax.random.split(key)
-            params = actor.init(kp, np.ones([1, obs_size]))
-            print(f"[dry_run] dummy primitive {i}: {eid}", flush=True)
-        else:
-            ckpt = args.primitive_checkpoints[i]
-            actor, params = load_primitive_actor(ckpt, action_size)
-            print(f"[load] primitive {i}: {eid} <- {ckpt}", flush=True)
-        primitives.append((actor, params, goal_fn))
-
     sd = args.state_dim
     eps = args.epsilon
     btype = args.barrier_type
     uses_gate = btype in ("multi", "euclidean")
     sidx = args.single_primitive_idx
 
-    def primitive_stats(obs):
-        """(mean, sigma) per primitive at obs -> (B, N, A) each."""
-        state = obs[:, :sd]
-        means, sigmas = [], []
-        for actor, params, goal_fn in primitives:
+    # ---- primitive providers: each is stats(obs) -> (mean[B,A], sigma[B,A]) in
+    # env-action space. 'scripted' = controller center + fitted/fixed Sigma;
+    # 'crl' = frozen actor (tanh-mean) + learned std. ----
+    def make_scripted(ctrl, goal_fn, sigma):
+        def stats(obs):
+            state = obs[:, :sd]
+            mean = ctrl(state, goal_fn(state, obs))
+            return mean, jnp.broadcast_to(sigma, mean.shape)
+        return stats
+
+    def make_crl(actor, params, goal_fn):
+        def stats(obs):
+            state = obs[:, :sd]
             obs_k = jnp.concatenate([state, goal_fn(state, obs)], axis=-1)
-            mean_k, log_std_k = actor.apply(params, obs_k)
-            sigma_k = jnp.maximum(jnp.exp(log_std_k), args.sigma_floor)
-            means.append(mean_k)
-            sigmas.append(sigma_k)
+            m, ls = actor.apply(params, obs_k)
+            return jnp.tanh(m), jnp.maximum(jnp.exp(ls), args.sigma_floor)
+        return stats
+
+    providers = []
+    for i, eid in enumerate(args.primitive_env_ids):
+        goal_fn = goal_fns[eid]
+        kind = args.primitive_kind[i] if i < len(args.primitive_kind) else "scripted"
+        if kind == "scripted":
+            ctrl = SCRIPTED_CONTROLLERS[eid]
+            if (not args.dry_run and i < len(args.skill_ball_paths)
+                    and args.skill_ball_paths[i]):
+                sigma = jnp.asarray(load_params(args.skill_ball_paths[i])["sigma"])
+                src = args.skill_ball_paths[i]
+            else:
+                sigma = jnp.ones(action_size) * 0.3  # fixed fallback / dry-run
+                src = "fixed(0.3)"
+            providers.append(make_scripted(ctrl, goal_fn, sigma))
+            print(f"[provider {i}] scripted {eid} sigma<-{src}", flush=True)
+        else:  # crl
+            if args.dry_run:
+                actor = Actor(action_size=action_size, network_width=args.net_width,
+                              network_depth=4, skip_connections=0, use_relu=args.use_relu)
+                key, kp = jax.random.split(key)
+                params = actor.init(kp, np.ones([1, obs_size]))
+                src = "dummy"
+            else:
+                actor, params = load_primitive_actor(
+                    args.primitive_checkpoints[i], action_size)
+                src = args.primitive_checkpoints[i]
+            providers.append(make_crl(actor, params, goal_fn))
+            print(f"[provider {i}] crl {eid} <-{src}", flush=True)
+
+    def primitive_stats(obs):
+        """(mean, sigma) per primitive at obs -> (B, N, A), env-action space."""
+        means, sigmas = [], []
+        for stats_fn in providers:
+            m, s = stats_fn(obs)
+            means.append(m)
+            sigmas.append(s)
         return jnp.stack(means, axis=1), jnp.stack(sigmas, axis=1)
 
     def assemble(means, sigmas, onehot, raw_s):
+        # Uniform action-space ball: a = clip(center + dx, -1, 1). center/metric come
+        # from the gate-selected primitive (means are env-action space for both
+        # provider kinds). 'none' = unconstrained policy directly in action space.
         if btype == "none":
-            return jnp.tanh(raw_s)
+            return jnp.clip(raw_s, -1.0, 1.0)
         if btype == "single":
             mean_sel, sigma_sel = means[:, sidx, :], sigmas[:, sidx, :]
         else:  # multi / euclidean
@@ -248,7 +286,7 @@ def main(args):
         norm = jnp.sqrt(jnp.sum(raw_s ** 2, axis=-1, keepdims=True) + 1e-8)
         u = eps * raw_s / jnp.maximum(1.0, norm)
         dx = u if btype == "euclidean" else sigma_sel * u
-        return jnp.tanh(mean_sel + dx)
+        return jnp.clip(mean_sel + dx, -1.0, 1.0)
 
     gate = CompositionGate(n_primitives=n_prim, action_size=action_size,
                            width=args.net_width, depth=args.net_depth,
@@ -376,6 +414,8 @@ def main(args):
             "env_id": args.env_id,
             "primitive_checkpoints": list(args.primitive_checkpoints),
             "primitive_env_ids": list(args.primitive_env_ids),
+            "primitive_kind": list(args.primitive_kind),
+            "skill_ball_paths": list(args.skill_ball_paths),
             "barrier_type": args.barrier_type,
             "epsilon": args.epsilon,
             "sigma_floor": args.sigma_floor,
