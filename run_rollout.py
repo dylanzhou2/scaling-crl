@@ -58,6 +58,9 @@ def parse_args():
            "for a base-vs-corrected comparison.")
   p.add_argument("--steps", type=int, default=1000, help="Max rollout steps.")
   p.add_argument("--seed", type=int, default=0, help="Reset PRNG seed.")
+  p.add_argument("--num_seeds", type=int, default=1,
+                 help="Render this many consecutive seeds (seed..seed+N-1), "
+                      "reusing the jitted policy. Writes <out>_seed<k>.html per seed.")
   p.add_argument("--out", default="rollout.html", help="Output HTML path.")
   p.add_argument(
       "--freeze_base", action="store_true",
@@ -188,33 +191,31 @@ def main():
   env_step = jax.jit(env.step)
   env_reset = jax.jit(env.reset)
 
-  env_state = env_reset(jax.random.PRNGKey(args.seed))
-  rollout_states = []
-  total_reward = 0.0
-
   if args.freeze_base:
     print("[base] FROZEN — base action dims (0,1,2) zeroed each step.")
 
-  for _ in range(args.steps):
-    obs = jnp.expand_dims(env_state.obs, axis=0)
-    action = policy(obs)[0]
-    if args.freeze_base:
-      action = action.at[:3].set(0.0)
-    env_state = env_step(env_state, action)
-    rollout_states.append(env_state.pipeline_state)
-    total_reward += env_state.reward.item()
-    if env_state.done:
-      break
+  for s in range(args.seed, args.seed + args.num_seeds):
+    env_state = env_reset(jax.random.PRNGKey(s))
+    rollout_states = []
+    total_reward = 0.0
+    max_reward = 0.0
+    for _ in range(args.steps):
+      obs = jnp.expand_dims(env_state.obs, axis=0)
+      action = policy(obs)[0]
+      if args.freeze_base:
+        action = action.at[:3].set(0.0)
+      env_state = env_step(env_state, action)
+      rollout_states.append(env_state.pipeline_state)
+      total_reward += env_state.reward.item()
+      max_reward = max(max_reward, env_state.reward.item())
+      if env_state.done:
+        break
 
-  print(f"Episode reward: {total_reward:.4f} over {len(rollout_states)} steps")
-
-  # ------------------------------------------------------------------
-  # Render
-  # ------------------------------------------------------------------
-  html_string = html.render(env.sys, rollout_states)
-  with open(args.out, "w") as f:
-    f.write(html_string)
-  print(f"Saved rollout to {args.out}")
+    out_path = args.out if args.num_seeds == 1 else args.out.replace(".html", f"_seed{s}.html")
+    with open(out_path, "w") as f:
+      f.write(html.render(env.sys, rollout_states))
+    print(f"[seed {s}] reward sum={total_reward:.3f} max={max_reward:.3f} "
+          f"over {len(rollout_states)} steps -> {out_path}")
 
 
 if __name__ == "__main__":

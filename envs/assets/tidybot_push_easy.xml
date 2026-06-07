@@ -104,7 +104,7 @@
       <geom class="base/visual" mesh="body" material="gray"/>
       <geom class="base/visual" mesh="top_plate" material="dark_gray"/>
       <geom class="base/visual" mesh="arm_plate" material="gray"/>
-      <geom class="base/collision" size="0.25 0.25 0.15" pos="0 0 0.1"/>
+      <geom class="base/collision" name="base_collision" size="0.25 0.25 0.15" pos="0 0 0.1"/>
 
       <body name="gen3/base_link" pos="0 0 0.335" quat="1 0 0 0">
         <geom class="gen3/visual" mesh="gen3/base_link"/>
@@ -239,6 +239,10 @@
     <pair geom1="cube_geom" geom2="right_pad2"/>
     <pair geom1="table_geom" geom2="left_pad1"/>
     <pair geom1="table_geom" geom2="right_pad1"/>
+
+    <!-- Make the robot base solid so objects can't tunnel through it (the base
+         collision geom is contype=0; this explicit pair forces cube-base contact). -->
+    <pair geom1="cube_geom" geom2="base_collision"/>
   </contact>
 
   <tendon>
