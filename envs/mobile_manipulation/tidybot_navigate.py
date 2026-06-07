@@ -83,7 +83,13 @@ class TidyBotNavigate(TidyBotEnv):
         # pose (absolute position target), gripper irrelevant (held closed).
         action = jnp.clip(action, -1.0, 1.0)
         base_current = arm_angles[:3]
-        base_action = base_current + action[:3] * self.base_scale
+        # Holonomic base: translate in world x/y to reach any target. Hold heading
+        # at 0 (face +y) instead of letting the policy spin joint_th freely (heading
+        # isn't in the goal, so an unconstrained base just rotates). A fixed heading
+        # also matches push_aside's frozen-base pose for a clean composition handoff.
+        base_xy = base_current[:2] + action[:2] * self.base_scale
+        base_th = jnp.zeros(1)
+        base_action = jnp.concatenate([base_xy, base_th])
         arm_action = self.ARM_Q_FOLD
         gripper_action = jnp.array([255.0])
         return jnp.concatenate([base_action, arm_action, gripper_action])
