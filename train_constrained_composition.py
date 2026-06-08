@@ -93,7 +93,7 @@ class CompArgs:
     # --- goal synthesis (the "planner interface" for the hallway) ---
     standoff: float = 0.4       # base stops this far (in y) short of the cube
     push_target_x: float = 0.45  # push the cube toward this x (near the wall)
-    aside_thresh: float = 0.3    # |cube_x| beyond this counts as "lane cleared"
+    aside_thresh: float = 0.25   # |cube_x| beyond this counts as "lane cleared"
     push_rel_offset: float = 0.2  # base-relative aside target for the CRL push goal
     # --- gate/residual network ---
     net_width: int = 256
@@ -103,6 +103,13 @@ class CompArgs:
     lr: float = 3e-4
     explore_std: float = 0.3
     gate_entropy_coef: float = 0.01
+    gate_commit: int = 25
+    """Gate stickiness: the selected primitive is committed for this many steps before
+    the gate may re-select. Per-step re-sampling (=1) makes a zero-init gate jitter
+    between primitives every step, so the rollout never coherently executes
+    navigate->push->navigate and earns no reward. Committing produces coherent primitive
+    executions that can complete the task. The gate's REINFORCE gradient is counted only
+    at the re-selection steps (where the decision is actually made)."""
     num_envs: int = 256
     num_iterations: int = 200
     grad_steps_per_iter: int = 50
@@ -344,48 +351,57 @@ def main(args):
         tx=optax.chain(optax.clip_by_global_norm(1.0), optax.adam(args.lr)),
     )
 
-    def policy_sample(params, obs, key):
-        means, sigmas = primitive_stats(obs)
-        logits, raw = gate.apply(params, obs)
-        key, kk, kn = jax.random.split(key, 3)
-        if uses_gate:
-            sel = jax.random.categorical(kk, logits)
-            onehot = jax.nn.one_hot(sel, n_prim)
-        else:
-            onehot = jax.nn.one_hot(jnp.full((obs.shape[0],), sidx), n_prim)
-        raw_s = raw + args.explore_std * jax.random.normal(kn, raw.shape)
-        action = assemble(means, sigmas, onehot, raw_s)
-        return action, onehot, raw_s
-
-    def policy_logprob(params, obs, onehot, raw_s):
+    def policy_logprob(params, obs, onehot, raw_s, gate_active):
+        # Residual log-prob is per step; the gate's log-prob is counted ONLY at the
+        # re-selection steps (gate_active=1) -- at committed steps the selection is a
+        # deterministic carry, not a fresh decision, so it carries no gradient.
         logits, raw = gate.apply(params, obs)
         logp = -0.5 * jnp.sum(((raw_s - raw) / args.explore_std) ** 2, axis=-1)
         ent = jnp.zeros(())
         if uses_gate:
-            logp = logp + jnp.sum(jax.nn.log_softmax(logits) * onehot, axis=-1)
+            logp = logp + jnp.sum(jax.nn.log_softmax(logits) * onehot, axis=-1) * gate_active
             p = jax.nn.softmax(logits)
-            ent = -jnp.mean(jnp.sum(p * jax.nn.log_softmax(logits), axis=-1))
+            ent_ps = -jnp.sum(p * jax.nn.log_softmax(logits), axis=-1)
+            ent = jnp.sum(ent_ps * gate_active) / (jnp.sum(gate_active) + 1e-8)
         return logp, ent
 
     @jax.jit
     def collect(params, env_state, key):
-        def step(carry, _):
-            env_state, key = carry
-            key, ak = jax.random.split(key)
-            action, onehot, raw_s = policy_sample(params, env_state.obs, ak)
+        # Sticky gate: re-sample the primitive only every `gate_commit` steps; between
+        # re-samples the previous selection is carried so the rollout executes a
+        # primitive coherently. The residual (raw_s) is sampled every step.
+        def step(carry, t):
+            env_state, key, prev_onehot = carry
             obs_t = env_state.obs
+            means, sigmas = primitive_stats(obs_t)
+            logits, raw = gate.apply(params, obs_t)
+            key, kk, kn = jax.random.split(key, 3)
+            if uses_gate:
+                new_onehot = jax.nn.one_hot(jax.random.categorical(kk, logits), n_prim)
+                do_resample = (t % args.gate_commit) == 0
+                onehot = jnp.where(do_resample, new_onehot, prev_onehot)
+                gate_active = jnp.broadcast_to(
+                    do_resample.astype(jnp.float32), (obs_t.shape[0],))
+            else:
+                onehot = jax.nn.one_hot(jnp.full((obs_t.shape[0],), sidx), n_prim)
+                gate_active = jnp.zeros((obs_t.shape[0],))
+            raw_s = raw + args.explore_std * jax.random.normal(kn, raw.shape)
+            action = assemble(means, sigmas, onehot, raw_s)
             env_state = env.step(env_state, action)
-            return (env_state, key), (obs_t, onehot, raw_s, env_state.reward)
+            return ((env_state, key, onehot),
+                    (obs_t, onehot, raw_s, gate_active, env_state.reward))
 
-        (env_state, _), (obs, onehot, raw_s, rew) = jax.lax.scan(
-            step, (env_state, key), None, length=args.episode_length)
+        n = env_state.reward.shape[0]
+        init_onehot = jax.nn.one_hot(jnp.zeros(n, dtype=jnp.int32), n_prim)
+        (env_state, _, _), (obs, onehot, raw_s, gate_active, rew) = jax.lax.scan(
+            step, (env_state, key, init_onehot), jnp.arange(args.episode_length))
         ep_return = jnp.sum(rew, axis=0)  # (N,) episodic (sparse) return
-        return env_state, obs, onehot, raw_s, ep_return
+        return env_state, obs, onehot, raw_s, gate_active, ep_return
 
     @jax.jit
-    def update(comp_state, obs_b, onehot_b, raw_b, adv_b):
+    def update(comp_state, obs_b, onehot_b, raw_b, ga_b, adv_b):
         def loss_fn(p):
-            logp, ent = policy_logprob(p, obs_b, onehot_b, raw_b)
+            logp, ent = policy_logprob(p, obs_b, onehot_b, raw_b, ga_b)
             pg = -jnp.mean(logp * adv_b)
             return pg - args.gate_entropy_coef * ent, (pg, ent)
         (loss, (pg, ent)), grad = jax.value_and_grad(loss_fn, has_aux=True)(comp_state.params)
@@ -394,23 +410,27 @@ def main(args):
 
     @jax.jit
     def eval_rollout(params, env_state):
-        def step(carry, _):
-            env_state, sum_r, max_r, sel = carry
+        def step(carry, t):
+            env_state, sum_r, max_r, sel, prev_onehot = carry
             means, sigmas = primitive_stats(env_state.obs)
             logits, raw = gate.apply(params, env_state.obs)
             if uses_gate:
-                onehot = jax.nn.one_hot(jnp.argmax(logits, axis=-1), n_prim)
+                new_onehot = jax.nn.one_hot(jnp.argmax(logits, axis=-1), n_prim)
+                do_resample = (t % args.gate_commit) == 0
+                onehot = jnp.where(do_resample, new_onehot, prev_onehot)  # sticky, as in collect
             else:
                 onehot = jax.nn.one_hot(jnp.full((env_state.obs.shape[0],), sidx), n_prim)
             action = assemble(means, sigmas, onehot, raw)  # deterministic (no noise)
             env_state = env.step(env_state, action)
             r = env_state.reward
-            return (env_state, sum_r + r, jnp.maximum(max_r, r), sel + onehot.mean(0)), None
+            return (env_state, sum_r + r, jnp.maximum(max_r, r),
+                    sel + onehot.mean(0), onehot), None
 
         n = env_state.reward.shape[0]
-        init = (env_state, jnp.zeros(n), jnp.zeros(n), jnp.zeros(n_prim))
-        (_, sum_r, max_r, sel), _ = jax.lax.scan(
-            step, init, None, length=args.episode_length)
+        init = (env_state, jnp.zeros(n), jnp.zeros(n), jnp.zeros(n_prim),
+                jax.nn.one_hot(jnp.zeros(n, dtype=jnp.int32), n_prim))
+        (_, sum_r, max_r, sel, _), _ = jax.lax.scan(
+            step, init, jnp.arange(args.episode_length))
         success = (max_r > args.success_threshold).astype(jnp.float32)
         return jnp.mean(sum_r), jnp.mean(success), sel / args.episode_length
 
@@ -427,12 +447,18 @@ def main(args):
     for it in range(1, args.num_iterations + 1):
         key, ck = jax.random.split(key)
         env_state = reset(jax.random.split(ck, args.num_envs))  # fresh episodes
-        env_state, obs, onehot, raw_s, ep_return = collect(comp_state.params, env_state, ck)
-        adv = ep_return - jnp.mean(ep_return)
+        env_state, obs, onehot, raw_s, gate_active, ep_return = collect(
+            comp_state.params, env_state, ck)
+        # Normalize the advantage (mean-center AND scale by std). Without the std
+        # scaling, the sparse hallway return (up to ~episode_length) produces enormous
+        # REINFORCE gradients that overshoot and oscillate (eval collapses between
+        # iters); normalizing keeps the update scale bounded and stable.
+        adv = (ep_return - jnp.mean(ep_return)) / (jnp.std(ep_return) + 1e-6)
         T, N = obs.shape[0], obs.shape[1]
         obs_f = obs.reshape(T * N, -1)
         onehot_f = onehot.reshape(T * N, -1)
         raw_f = raw_s.reshape(T * N, -1)
+        ga_f = gate_active.reshape(T * N)
         adv_f = jnp.broadcast_to(adv[None, :], (T, N)).reshape(T * N)
 
         last = (0.0, 0.0, 0.0)
@@ -440,7 +466,7 @@ def main(args):
             key, ik = jax.random.split(key)
             idx = jax.random.randint(ik, (args.batch_size,), 0, T * N)
             comp_state, loss, pg, ent = update(
-                comp_state, obs_f[idx], onehot_f[idx], raw_f[idx], adv_f[idx])
+                comp_state, obs_f[idx], onehot_f[idx], raw_f[idx], ga_f[idx], adv_f[idx])
             last = (float(loss), float(pg), float(ent))
         print(f"[train it={it:>3}] ep_return_mean={float(jnp.mean(ep_return)):+.3f} "
               f"loss={last[0]:+.4f} pg={last[1]:+.4f} ent={last[2]:.3f}", flush=True)
@@ -465,6 +491,7 @@ def main(args):
             "barrier_type": args.barrier_type,
             "epsilon": args.epsilon,
             "sigma_floor": args.sigma_floor,
+            "gate_commit": args.gate_commit,
             "net_width": args.net_width,
             "net_depth": args.net_depth,
         },

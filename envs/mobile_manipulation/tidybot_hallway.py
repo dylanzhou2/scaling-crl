@@ -27,8 +27,8 @@ class TidyBotHallway(TidyBotEnv):
     ARM_Q_FOLD = jnp.array([0.0, -1.0, 0.0, -2.0, 0.0, 1.0, 0.0])
 
     def __init__(self, base_scale=0.2, success_radius=0.4, goal_xy=(0.0, 2.5),
-                 aside_thresh=0.3, lift_thresh=0.15,
-                 cube_noise_scale=0.25, base_noise_scale=0.05, **kwargs):
+                 aside_thresh=0.25, lift_thresh=0.15,
+                 cube_noise_scale=0.1, base_noise_scale=0.05, **kwargs):
         self.success_radius = success_radius
         self.goal_xy = jnp.array(goal_xy)
         # Anti-bulldoze: success requires the cube CLEARED from the lane, not just
