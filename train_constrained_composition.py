@@ -76,8 +76,9 @@ class CompArgs:
     primitive_checkpoints: Tuple[str, ...] = ()
     primitive_env_ids: Tuple[str, ...] = ("tidybot_navigate", "tidybot_push_aside")
     primitive_kind: Tuple[str, ...] = ("scripted", "scripted")
-    """Per-slot ball source aligned to primitive_env_ids: 'scripted' (controller +
-    fitted/fixed Sigma) or 'crl' (frozen actor mean + learned std)."""
+    """Per-slot ball source aligned to primitive_env_ids: 'scripted' (live
+    controller center + Sigma), 'envelope' (fixed mu+Sigma from a success library;
+    use a wider --epsilon ~2), or 'crl' (frozen actor mean + learned std)."""
     skill_ball_paths: Tuple[str, ...] = ()
     """Per-slot fitted-Sigma pkl from collect_scripted_skill_data.py (scripted
     slots). Empty/missing => fixed-Sigma fallback (also used for --dry_run)."""
@@ -234,6 +235,15 @@ def main(args):
             return jnp.tanh(m), jnp.maximum(jnp.exp(ls), args.sigma_floor)
         return stats
 
+    def make_envelope(mu, sigma):
+        # State-INDEPENDENT envelope from a success library: fixed center mu + spread
+        # sigma. RL explores within mu +/- eps*sigma (use a wider --epsilon, ~2).
+        def stats(obs):
+            B = obs.shape[0]
+            return (jnp.broadcast_to(mu, (B, mu.shape[0])),
+                    jnp.broadcast_to(sigma, (B, sigma.shape[0])))
+        return stats
+
     providers = []
     for i, eid in enumerate(args.primitive_env_ids):
         goal_fn = goal_fns[eid]
@@ -249,6 +259,19 @@ def main(args):
                 src = "fixed(0.3)"
             providers.append(make_scripted(ctrl, goal_fn, sigma))
             print(f"[provider {i}] scripted {eid} sigma<-{src}", flush=True)
+        elif kind == "envelope":
+            if (args.dry_run or i >= len(args.skill_ball_paths)
+                    or not args.skill_ball_paths[i]):
+                mu = jnp.zeros(action_size)
+                sigma = jnp.ones(action_size) * 0.5  # fixed fallback / dry-run
+                src = "fixed(mu=0,sigma=0.5)"
+            else:
+                blob = load_params(args.skill_ball_paths[i])
+                mu = jnp.asarray(blob["mu"])
+                sigma = jnp.asarray(blob["sigma"])
+                src = args.skill_ball_paths[i]
+            providers.append(make_envelope(mu, sigma))
+            print(f"[provider {i}] envelope {eid} mu/sigma<-{src}", flush=True)
         else:  # crl
             if args.dry_run:
                 actor = Actor(action_size=action_size, network_width=args.net_width,
