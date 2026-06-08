@@ -40,6 +40,10 @@ def main():
     p.add_argument("--sigma_floor", type=float, default=0.03)
     p.add_argument("--arm_noise", type=float, default=-1.0,
                    help="Override the skill's default arm-start noise (-1 = default).")
+    p.add_argument("--success_dx", type=float, default=0.0,
+                   help="If >0, count a push 'successful' when the cube's +x "
+                        "displacement exceeds this (looser than reaching the goal). "
+                        "Diagnostic: tells us if the cube moves at all.")
     p.add_argument("--state_dim", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="")
@@ -64,13 +68,18 @@ def main():
 
     @jax.jit
     def rollout(s, key):
+        cube0_x = s.obs[:, 10]  # cube x at reset (for displacement-based success)
         def stp(carry, _):
             s, key = carry
             key, nk = jax.random.split(key)
             a = ctrl(s.obs[:, :sd], s.obs[:, sd:sd + 2])
             a = jnp.clip(a + args.noise * jax.random.normal(nk, a.shape), -1.0, 1.0)
             s = step(s, a)
-            return (s, key), (a, s.metrics["success"])
+            if args.success_dx > 0.0:
+                succ = (s.obs[:, 10] - cube0_x > args.success_dx).astype(jnp.float32)
+            else:
+                succ = s.metrics["success"]
+            return (s, key), (a, succ)
         (s, _), (acts, succ) = jax.lax.scan(stp, (s, key), None, length=args.steps)
         return acts, succ
 
