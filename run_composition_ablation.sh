@@ -13,8 +13,9 @@
 # Usage (defaults are tuned for a single NVIDIA GPU):
 #   ./run_composition_ablation.sh
 # Common overrides:
+#   BARRIERS="multi" SEEDS="0" COLLECT=0 ./run_composition_ablation.sh   # multi-only, reuse balls
 #   BARRIERS="none multi" SEEDS="0 1" ITERS=100 NUM_ENVS=512 ./run_composition_ablation.sh
-#   COLLECT=0 ./run_composition_ablation.sh     # reuse existing skill_balls/*.pkl
+#   EXPLORE_STD=0.15 STANDOFF=0.5 PUSH_TARGET_X=0.4 ./run_composition_ablation.sh  # tune if it won't learn
 set -euo pipefail
 
 BARRIERS="${BARRIERS:-none single euclidean multi}"
@@ -23,6 +24,10 @@ ITERS="${ITERS:-200}"
 NUM_ENVS="${NUM_ENVS:-256}"
 EPISODE_LENGTH="${EPISODE_LENGTH:-500}"
 EPSILON="${EPSILON:-0.3}"
+EXPLORE_STD="${EXPLORE_STD:-0.3}"       # exploration noise inside the ball; LOWER
+                                        # (e.g. 0.15) if ep_return_mean stays at 0
+STANDOFF="${STANDOFF:-0.4}"            # base parks this far (m, in y) before the cube
+PUSH_TARGET_X="${PUSH_TARGET_X:-0.45}" # push aims the cube toward this x (clear lane)
 
 COLLECT="${COLLECT:-1}"                 # 1 = (re)fit the skill balls first
 COLLECT_ENVS="${COLLECT_ENVS:-256}"
@@ -61,6 +66,9 @@ for bar in $BARRIERS; do
       --skill_ball_paths "$BASE_BALL" "$PUSH_BALL" \
       --barrier_type "$bar" \
       --epsilon "$EPSILON" \
+      --explore_std "$EXPLORE_STD" \
+      --standoff "$STANDOFF" \
+      --push_target_x "$PUSH_TARGET_X" \
       --num_iterations "$ITERS" \
       --num_envs "$NUM_ENVS" \
       --episode_length "$EPISODE_LENGTH" \
