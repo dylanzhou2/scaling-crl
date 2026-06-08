@@ -388,21 +388,34 @@ def main(args):
             raw_s = raw + args.explore_std * jax.random.normal(kn, raw.shape)
             action = assemble(means, sigmas, onehot, raw_s)
             env_state = env.step(env_state, action)
+            rew = jnp.where(jnp.isfinite(env_state.reward), env_state.reward, 0.0)  # overflow guard
             return ((env_state, key, onehot),
-                    (obs_t, onehot, raw_s, gate_active, env_state.reward))
+                    (obs_t, onehot, raw_s, gate_active, rew))
 
         n = env_state.reward.shape[0]
         init_onehot = jax.nn.one_hot(jnp.zeros(n, dtype=jnp.int32), n_prim)
         (env_state, _, _), (obs, onehot, raw_s, gate_active, rew) = jax.lax.scan(
             step, (env_state, key, init_onehot), jnp.arange(args.episode_length))
         ep_return = jnp.sum(rew, axis=0)  # (N,) episodic (sparse) return
-        return env_state, obs, onehot, raw_s, gate_active, ep_return
+        # Count envs that went non-finite at any step (overflow/frozen). Diagnostic, and
+        # update() masks these samples out so one bad env can't NaN the gradient.
+        n_frozen = jnp.sum(~jnp.all(jnp.isfinite(obs), axis=(0, 2)))
+        return env_state, obs, onehot, raw_s, gate_active, ep_return, n_frozen
 
     @jax.jit
     def update(comp_state, obs_b, onehot_b, raw_b, ga_b, adv_b):
+        # Guard: drop transitions with non-finite obs/raw/adv (overflow envs) and
+        # sanitize the inputs, so a single bad sample can't NaN the whole gradient.
+        valid = (jnp.all(jnp.isfinite(obs_b), axis=-1)
+                 & jnp.all(jnp.isfinite(raw_b), axis=-1) & jnp.isfinite(adv_b))
+        w = valid.astype(jnp.float32)
+        obs_b = jnp.where(valid[:, None], obs_b, 0.0)
+        raw_b = jnp.where(valid[:, None], raw_b, 0.0)
+        adv_b = jnp.where(valid, adv_b, 0.0)
+
         def loss_fn(p):
             logp, ent = policy_logprob(p, obs_b, onehot_b, raw_b, ga_b)
-            pg = -jnp.mean(logp * adv_b)
+            pg = -jnp.sum(logp * adv_b * w) / (jnp.sum(w) + 1e-6)  # masked mean
             return pg - args.gate_entropy_coef * ent, (pg, ent)
         (loss, (pg, ent)), grad = jax.value_and_grad(loss_fn, has_aux=True)(comp_state.params)
         comp_state = comp_state.apply_gradients(grads=grad)
@@ -422,7 +435,7 @@ def main(args):
                 onehot = jax.nn.one_hot(jnp.full((env_state.obs.shape[0],), sidx), n_prim)
             action = assemble(means, sigmas, onehot, raw)  # deterministic (no noise)
             env_state = env.step(env_state, action)
-            r = env_state.reward
+            r = jnp.where(jnp.isfinite(env_state.reward), env_state.reward, 0.0)
             return (env_state, sum_r + r, jnp.maximum(max_r, r),
                     sel + onehot.mean(0), onehot), None
 
@@ -447,7 +460,7 @@ def main(args):
     for it in range(1, args.num_iterations + 1):
         key, ck = jax.random.split(key)
         env_state = reset(jax.random.split(ck, args.num_envs))  # fresh episodes
-        env_state, obs, onehot, raw_s, gate_active, ep_return = collect(
+        env_state, obs, onehot, raw_s, gate_active, ep_return, n_frozen = collect(
             comp_state.params, env_state, ck)
         # Normalize the advantage (mean-center AND scale by std). Without the std
         # scaling, the sparse hallway return (up to ~episode_length) produces enormous
@@ -469,7 +482,8 @@ def main(args):
                 comp_state, obs_f[idx], onehot_f[idx], raw_f[idx], ga_f[idx], adv_f[idx])
             last = (float(loss), float(pg), float(ent))
         print(f"[train it={it:>3}] ep_return_mean={float(jnp.mean(ep_return)):+.3f} "
-              f"loss={last[0]:+.4f} pg={last[1]:+.4f} ent={last[2]:.3f}", flush=True)
+              f"loss={last[0]:+.4f} pg={last[1]:+.4f} ent={last[2]:.3f} "
+              f"frozen={int(n_frozen)}/{args.num_envs}", flush=True)
         if args.eval_every and it % args.eval_every == 0:
             run_eval(it)
 
