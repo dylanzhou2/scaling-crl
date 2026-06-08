@@ -94,6 +94,7 @@ class CompArgs:
     standoff: float = 0.4       # base stops this far (in y) short of the cube
     push_target_x: float = 0.45  # push the cube toward this x (near the wall)
     aside_thresh: float = 0.3    # |cube_x| beyond this counts as "lane cleared"
+    push_rel_offset: float = 0.2  # base-relative aside target for the CRL push goal
     # --- gate/residual network ---
     net_width: int = 256
     net_depth: int = 4
@@ -227,12 +228,31 @@ def main(args):
             return mean, jnp.broadcast_to(sigma, mean.shape)
         return stats
 
-    def make_crl(actor, params, goal_fn):
+    def make_crl(actor, params, goal_fn, base_relative):
         def stats(obs):
             state = obs[:, :sd]
-            obs_k = jnp.concatenate([state, goal_fn(state, obs)], axis=-1)
+            if base_relative:
+                # Push primitive was trained base-at-origin / base-frozen. Rebuild its
+                # obs in the base frame: base xy -> 0, cube/eef relative to the base,
+                # goal = cube_rel + push_rel_offset. Hold the base in the output.
+                B = state.shape[0]
+                z = jnp.zeros((B, 1))
+                off = jnp.concatenate([state[:, 0:1], state[:, 1:2], z], axis=-1)
+                base_q = jnp.concatenate([z, z, state[:, 2:3]], axis=-1)
+                cube = state[:, 10:13] - off
+                eef = state[:, 13:16] - off
+                st = jnp.concatenate(
+                    [base_q, state[:, 3:10], cube, eef, state[:, 16:19], state[:, 19:20]],
+                    axis=-1)
+                goal = cube[:, 0:2] + jnp.array([args.push_rel_offset, 0.0])
+                obs_k = jnp.concatenate([st, goal], axis=-1)
+            else:
+                obs_k = jnp.concatenate([state, goal_fn(state, obs)], axis=-1)
             m, ls = actor.apply(params, obs_k)
-            return jnp.tanh(m), jnp.maximum(jnp.exp(ls), args.sigma_floor)
+            mean = jnp.tanh(m)
+            if base_relative:
+                mean = mean.at[:, 0:3].set(0.0)  # hold base (trained base-frozen)
+            return mean, jnp.maximum(jnp.exp(ls), args.sigma_floor)
         return stats
 
     def make_envelope(mu, sigma):
@@ -273,6 +293,9 @@ def main(args):
             providers.append(make_envelope(mu, sigma))
             print(f"[provider {i}] envelope {eid} mu/sigma<-{src}", flush=True)
         else:  # crl
+            # Frozen-base push primitives (trained base-at-origin) need the
+            # base-relative obs transform + base-hold to deploy in the mobile hallway.
+            base_rel = eid in ("tidybot_push_aside", "tidybot_push_easy")
             if args.dry_run:
                 actor = Actor(action_size=action_size, network_width=args.net_width,
                               network_depth=4, skip_connections=0, use_relu=args.use_relu)
@@ -283,8 +306,8 @@ def main(args):
                 actor, params = load_primitive_actor(
                     args.primitive_checkpoints[i], action_size)
                 src = args.primitive_checkpoints[i]
-            providers.append(make_crl(actor, params, goal_fn))
-            print(f"[provider {i}] crl {eid} <-{src}", flush=True)
+            providers.append(make_crl(actor, params, goal_fn, base_rel))
+            print(f"[provider {i}] crl {eid} base_relative={base_rel} <-{src}", flush=True)
 
     def primitive_stats(obs):
         """(mean, sigma) per primitive at obs -> (B, N, A), env-action space."""
