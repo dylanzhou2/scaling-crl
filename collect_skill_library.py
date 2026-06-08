@@ -23,11 +23,11 @@ from train import save_params
 from train_residual_mab import make_env
 from envs.scripted_controllers import CONTROLLERS
 
-# skill -> (native env, arm-start noise). Push uses arm-start noise so successful
-# pushes are captured from varied (partly-tucked) arm starts, so the library
-# includes the lower-then-push actions the hallway needs (not just the sweep from
-# an already-positioned arm).
-SKILL = {"base": ("tidybot_navigate", 0.0), "push": ("tidybot_push_aside", 0.4)}
+# skill -> (native env, default arm-start noise). Arm-start noise for push was meant
+# to capture the lowering motion, but the controller can't succeed from varied starts
+# (0/256, + sim overflow), so the default is 0 = contact-start sweep. Override with
+# --arm_noise if you want to experiment.
+SKILL = {"base": ("tidybot_navigate", 0.0), "push": ("tidybot_push_aside", 0.0)}
 
 
 def main():
@@ -38,12 +38,16 @@ def main():
     p.add_argument("--noise", type=float, default=0.05,
                    help="Small action noise for action diversity within successes.")
     p.add_argument("--sigma_floor", type=float, default=0.03)
+    p.add_argument("--arm_noise", type=float, default=-1.0,
+                   help="Override the skill's default arm-start noise (-1 = default).")
     p.add_argument("--state_dim", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="")
     args = p.parse_args()
 
     env_id, arm_noise = SKILL[args.skill]
+    if args.arm_noise >= 0.0:
+        arm_noise = args.arm_noise
     ctrl = CONTROLLERS[env_id]
     sd = args.state_dim
 
