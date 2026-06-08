@@ -23,12 +23,16 @@ from train import save_params
 from train_residual_mab import make_env
 from envs.scripted_controllers import CONTROLLERS
 
-NATIVE = {"base": "tidybot_navigate", "push": "tidybot_push_aside"}
+# skill -> (native env, arm-start noise). Push uses arm-start noise so successful
+# pushes are captured from varied (partly-tucked) arm starts, so the library
+# includes the lower-then-push actions the hallway needs (not just the sweep from
+# an already-positioned arm).
+SKILL = {"base": ("tidybot_navigate", 0.0), "push": ("tidybot_push_aside", 0.4)}
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--skill", choices=list(NATIVE), required=True)
+    p.add_argument("--skill", choices=list(SKILL), required=True)
     p.add_argument("--num_envs", type=int, default=256)
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--noise", type=float, default=0.05,
@@ -39,11 +43,13 @@ def main():
     p.add_argument("--out", default="")
     args = p.parse_args()
 
-    env_id = NATIVE[args.skill]
+    env_id, arm_noise = SKILL[args.skill]
     ctrl = CONTROLLERS[env_id]
     sd = args.state_dim
 
     env = make_env(env_id)
+    if arm_noise > 0:
+        env.arm_noise_scale = arm_noise  # varied arm starts -> capture lowering
     env = envs.training.wrap(env, episode_length=args.steps)
     step = jax.jit(env.step)
     reset = jax.jit(env.reset)
