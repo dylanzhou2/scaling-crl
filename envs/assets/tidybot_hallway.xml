@@ -95,7 +95,13 @@
     <light name="top" pos="0 0 2" mode="trackcom"/>
 
     <body name="base_link">
-      <inertial pos="-0.000018 -0.000005 0.045575" mass="61.697" diaginertia="0.001 0.001 0.001"/>
+      <!-- Realistic rotational inertia for a ~0.5 m, 61.7 kg base (m*(w^2+d^2)/12 ~= 2.5).
+           The original 0.001 was ~3000x too small: any off-center base contact (cube /
+           wall) produced torque/inertia ~ astronomically large yaw acceleration that
+           DIVERGED to float overflow on the MJX-GPU solver (CPU happened to hold). This
+           is why the hallway base exploded on contact while base-frozen push_aside and
+           contact-free navigate were stable. Do not restore 0.001. -->
+      <inertial pos="-0.000018 -0.000005 0.045575" mass="61.697" diaginertia="2.5 2.5 2.5"/>
       <joint name="joint_x" type="slide" axis="1 0 0"/>
       <joint name="joint_y" type="slide" axis="0 1 0"/>
       <joint name="joint_th"/>
@@ -249,9 +255,9 @@
          The base collision geom is contype=0 (no auto-collisions, so it never
          penetrates the floor); these explicit pairs force exactly the contacts we
          want. -->
-    <pair geom1="cube_geom" geom2="base_collision"/>
-    <pair geom1="wall_left" geom2="base_collision"/>
-    <pair geom1="wall_right" geom2="base_collision"/>
+    <pair geom1="cube_geom" geom2="base_collision" solref="0.04 1" solimp="0.9 0.95 0.01"/>
+    <pair geom1="wall_left" geom2="base_collision" solref="0.04 1" solimp="0.9 0.95 0.01"/>
+    <pair geom1="wall_right" geom2="base_collision" solref="0.04 1" solimp="0.9 0.95 0.01"/>
   </contact>
 
   <tendon>
