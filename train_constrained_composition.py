@@ -88,6 +88,14 @@ class CompArgs:
     # --- barrier / composition ---
     barrier_type: str = "multi"  # none | single | euclidean | multi
     single_primitive_idx: int = 1  # used by barrier_type=single (default push_aside)
+    gate_mode: str = "learned"
+    """How the primitive is selected each step. 'learned': the gate net selects (sticky
+    sampling, learned by REINFORCE). 'scripted': a hand-coded planner gate selects (push
+    when behind the cube and the lane is not cleared, else navigate -- the scaffold
+    sequencing), and RL learns ONLY the in-ball residual. The scripted gate supplies the
+    correct WHEN (the role a VLM planner plays) so the barrier ablation measures the
+    Mahalanobis ball on the residual; at init (residual=0) the policy matches the scaffold."""
+    standoff_radius: float = 0.3  # scripted gate: select push when base within this of standoff
     epsilon: float = 0.3
     sigma_floor: float = 0.1
     # --- goal synthesis (the "planner interface" for the hallway) ---
@@ -233,13 +241,31 @@ def main(args):
     n_prim = len(args.primitive_env_ids)
     goal_fns = build_goal_fns(args)
     print(f"[env] {args.env_id} obs={obs_size} act={action_size} "
-          f"n_primitives={n_prim} barrier={args.barrier_type}", flush=True)
+          f"n_primitives={n_prim} barrier={args.barrier_type} gate_mode={args.gate_mode}",
+          flush=True)
 
     sd = args.state_dim
     eps = args.epsilon
     btype = args.barrier_type
     uses_gate = btype in ("multi", "euclidean")
     sidx = args.single_primitive_idx
+
+    # ---- scripted (planner) gate: the scaffold sequencing. Select the push primitive
+    # when the base is behind the cube and the lane is not yet cleared; otherwise select
+    # navigate (whose goal_fn drives to the standoff before clearing and to the far end
+    # after). Used when --gate_mode scripted: the gate supplies the WHEN, RL learns the
+    # in-ball residual. ----
+    nav_idx = next((i for i, e in enumerate(args.primitive_env_ids) if "navigate" in e), 0)
+    push_idx = next((i for i, e in enumerate(args.primitive_env_ids) if "push" in e), 1)
+
+    def scripted_gate(obs):
+        state = obs[:, :sd]
+        cube_xy, cube_x, base_xy = state[:, 10:12], state[:, 10], state[:, 0:2]
+        standoff = cube_xy - jnp.array([0.0, args.standoff])
+        cleared = jnp.abs(cube_x) > args.aside_thresh
+        near = jnp.linalg.norm(base_xy - standoff, axis=-1) < args.standoff_radius
+        do_push = jnp.logical_and(jnp.logical_not(cleared), near)
+        return jax.nn.one_hot(jnp.where(do_push, push_idx, nav_idx), n_prim)
 
     # ---- primitive providers: each is stats(obs) -> (mean[B,A], sigma[B,A]) in
     # env-action space. 'scripted' = controller center + fitted/fixed Sigma;
@@ -394,7 +420,10 @@ def main(args):
             means, sigmas = primitive_stats(obs_t)
             logits, raw = gate.apply(params, obs_t)
             key, kk, kn = jax.random.split(key, 3)
-            if uses_gate:
+            if uses_gate and args.gate_mode == "scripted":
+                onehot = scripted_gate(obs_t)  # planner gate; only the residual is learned
+                gate_active = jnp.zeros((obs_t.shape[0],))
+            elif uses_gate:
                 new_onehot = jax.nn.one_hot(jax.random.categorical(kk, logits), n_prim)
                 do_resample = (t % args.gate_commit) == 0
                 onehot = jnp.where(do_resample, new_onehot, prev_onehot)
@@ -450,7 +479,9 @@ def main(args):
             env_state, sum_r, max_r, sel, prev_onehot = carry
             means, sigmas = primitive_stats(env_state.obs)
             logits, raw = gate.apply(params, env_state.obs)
-            if uses_gate:
+            if uses_gate and args.gate_mode == "scripted":
+                onehot = scripted_gate(env_state.obs)
+            elif uses_gate:
                 new_onehot = jax.nn.one_hot(jnp.argmax(logits, axis=-1), n_prim)
                 do_resample = (t % args.gate_commit) == 0
                 onehot = jnp.where(do_resample, new_onehot, prev_onehot)  # sticky, as in collect
@@ -529,6 +560,7 @@ def main(args):
             "primitive_kind": list(args.primitive_kind),
             "skill_ball_paths": list(args.skill_ball_paths),
             "barrier_type": args.barrier_type,
+            "gate_mode": args.gate_mode,
             "epsilon": args.epsilon,
             "sigma_floor": args.sigma_floor,
             "gate_commit": args.gate_commit,
