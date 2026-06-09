@@ -102,6 +102,13 @@ class CompArgs:
     # --- policy gradient ---
     lr: float = 3e-4
     explore_std: float = 0.3
+    gamma: float = 0.99
+    """Discount for the per-timestep reward-to-go advantage. The hallway reward is
+    sparse and terminal-ish (success holds for the last steps), so crediting every
+    timestep with the WHOLE-episode return (gamma->no temporal credit) reinforces every
+    gate choice in every state equally -- the gate can't learn the state-conditional
+    sequencing and random-walks. Reward-to-go credits each timestep with its discounted
+    FUTURE return, so the decisions that lead into success get the credit."""
     gate_entropy_coef: float = 0.01
     gate_commit: int = 25
     """Gate stickiness: the selected primitive is committed for this many steps before
@@ -153,6 +160,15 @@ class CompositionGate(nn.Module):
         logits = nn.Dense(self.n_primitives, kernel_init=zeros, bias_init=zeros)(x)
         raw = nn.Dense(self.action_size, kernel_init=zeros, bias_init=zeros)(x)
         return logits, raw
+
+
+def discounted_rtg(rew, gamma):
+    """Per-timestep reward-to-go R_t = sum_{t'>=t} gamma^(t'-t) rew_t'. rew: (T, N)."""
+    def bwd(carry, r):
+        carry = r + gamma * carry
+        return carry, carry
+    _, out = jax.lax.scan(bwd, jnp.zeros(rew.shape[1]), rew, reverse=True)
+    return out
 
 
 def build_goal_fns(args):
@@ -396,11 +412,10 @@ def main(args):
         init_onehot = jax.nn.one_hot(jnp.zeros(n, dtype=jnp.int32), n_prim)
         (env_state, _, _), (obs, onehot, raw_s, gate_active, rew) = jax.lax.scan(
             step, (env_state, key, init_onehot), jnp.arange(args.episode_length))
-        ep_return = jnp.sum(rew, axis=0)  # (N,) episodic (sparse) return
         # Count envs that went non-finite at any step (overflow/frozen). Diagnostic, and
         # update() masks these samples out so one bad env can't NaN the gradient.
         n_frozen = jnp.sum(~jnp.all(jnp.isfinite(obs), axis=(0, 2)))
-        return env_state, obs, onehot, raw_s, gate_active, ep_return, n_frozen
+        return env_state, obs, onehot, raw_s, gate_active, rew, n_frozen  # rew: (T, N)
 
     @jax.jit
     def update(comp_state, obs_b, onehot_b, raw_b, ga_b, adv_b):
@@ -460,19 +475,22 @@ def main(args):
     for it in range(1, args.num_iterations + 1):
         key, ck = jax.random.split(key)
         env_state = reset(jax.random.split(ck, args.num_envs))  # fresh episodes
-        env_state, obs, onehot, raw_s, gate_active, ep_return, n_frozen = collect(
+        env_state, obs, onehot, raw_s, gate_active, rew, n_frozen = collect(
             comp_state.params, env_state, ck)
-        # Normalize the advantage (mean-center AND scale by std). Without the std
-        # scaling, the sparse hallway return (up to ~episode_length) produces enormous
-        # REINFORCE gradients that overshoot and oscillate (eval collapses between
-        # iters); normalizing keeps the update scale bounded and stable.
-        adv = (ep_return - jnp.mean(ep_return)) / (jnp.std(ep_return) + 1e-6)
+        ep_return = jnp.sum(rew, axis=0)  # (N,) episodic return, for logging
+        # Per-timestep reward-to-go gives each (state, gate-choice) credit for its FUTURE
+        # return -- so the decisions that lead into success are reinforced, instead of
+        # every timestep getting the same whole-episode number (which can't teach
+        # state-conditional sequencing). Normalize over all (T, N) for a bounded,
+        # stable update scale.
+        rtg = discounted_rtg(rew, args.gamma)  # (T, N)
+        adv = (rtg - jnp.mean(rtg)) / (jnp.std(rtg) + 1e-6)
         T, N = obs.shape[0], obs.shape[1]
         obs_f = obs.reshape(T * N, -1)
         onehot_f = onehot.reshape(T * N, -1)
         raw_f = raw_s.reshape(T * N, -1)
         ga_f = gate_active.reshape(T * N)
-        adv_f = jnp.broadcast_to(adv[None, :], (T, N)).reshape(T * N)
+        adv_f = adv.reshape(T * N)
 
         last = (0.0, 0.0, 0.0)
         for _ in range(args.grad_steps_per_iter):
@@ -506,6 +524,7 @@ def main(args):
             "epsilon": args.epsilon,
             "sigma_floor": args.sigma_floor,
             "gate_commit": args.gate_commit,
+            "gamma": args.gamma,
             "net_width": args.net_width,
             "net_depth": args.net_depth,
         },
