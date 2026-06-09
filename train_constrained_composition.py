@@ -60,7 +60,8 @@ import tyro
 
 from train import Actor, residual_block, load_params, save_params, Args  # noqa: F401
 from train_residual_mab import make_env
-from envs.scripted_controllers import CONTROLLERS as SCRIPTED_CONTROLLERS
+from envs.scripted_controllers import (
+    CONTROLLERS as SCRIPTED_CONTROLLERS, base_control, ARM_Q_CONTACT)
 
 # Let the unpickler resolve `__main__.Args` for the primitives' sibling args.pkl.
 import sys as _sys
@@ -267,6 +268,17 @@ def main(args):
         do_push = jnp.logical_and(jnp.logical_not(cleared), near)
         return jax.nn.one_hot(jnp.where(do_push, push_idx, nav_idx), n_prim)
 
+    def nav_lower_ctrl(state, goal_xy):
+        # Navigate controller that ALSO lowers the arm toward the push contact pose while
+        # the lane is uncleared (as the scaffold's nav_lower did), so the push primitive
+        # starts from the contact pose it was trained at instead of the folded pose. The
+        # navigate ball's sigma is ~floor on the arm dims, so this lowering is effectively
+        # deterministic (the residual refines the base, not the arm).
+        a = base_control(state, goal_xy)
+        cleared = (jnp.abs(state[:, 10]) > args.aside_thresh)[:, None]
+        arm = jnp.clip(ARM_Q_CONTACT - state[:, 3:10], -1.0, 1.0)
+        return a.at[:, 3:10].set(jnp.where(cleared, a[:, 3:10], arm))
+
     # ---- primitive providers: each is stats(obs) -> (mean[B,A], sigma[B,A]) in
     # env-action space. 'scripted' = controller center + fitted/fixed Sigma;
     # 'crl' = frozen actor (tanh-mean) + learned std. ----
@@ -318,7 +330,9 @@ def main(args):
         goal_fn = goal_fns[eid]
         kind = args.primitive_kind[i] if i < len(args.primitive_kind) else "scripted"
         if kind == "scripted":
-            ctrl = SCRIPTED_CONTROLLERS[eid]
+            # Navigate lowers the arm toward contact during approach so the push
+            # primitive engages from its trained pose (matches the scaffold).
+            ctrl = nav_lower_ctrl if "navigate" in eid else SCRIPTED_CONTROLLERS[eid]
             if (not args.dry_run and i < len(args.skill_ball_paths)
                     and args.skill_ball_paths[i]):
                 sigma = jnp.asarray(load_params(args.skill_ball_paths[i])["sigma"])
