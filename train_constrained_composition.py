@@ -367,19 +367,21 @@ def main(args):
         tx=optax.chain(optax.clip_by_global_norm(1.0), optax.adam(args.lr)),
     )
 
-    def policy_logprob(params, obs, onehot, raw_s, gate_active):
-        # Residual log-prob is per step; the gate's log-prob is counted ONLY at the
-        # re-selection steps (gate_active=1) -- at committed steps the selection is a
-        # deterministic carry, not a fresh decision, so it carries no gradient.
+    def policy_logprob(params, obs, onehot, raw_s):
+        """Returns per-sample (residual_logp, gate_logp, gate_entropy). The gate terms are
+        raw; update() weights them by the gate-active mask and normalizes by the
+        gate-active COUNT (not the full batch). The residual fires every step but the gate
+        decides only ~1/gate_commit of steps, so a single combined mean would dilute the
+        gate gradient ~gate_commit-fold and the gate would never move off uniform."""
         logits, raw = gate.apply(params, obs)
-        logp = -0.5 * jnp.sum(((raw_s - raw) / args.explore_std) ** 2, axis=-1)
-        ent = jnp.zeros(())
+        res_logp = -0.5 * jnp.sum(((raw_s - raw) / args.explore_std) ** 2, axis=-1)
         if uses_gate:
-            logp = logp + jnp.sum(jax.nn.log_softmax(logits) * onehot, axis=-1) * gate_active
-            p = jax.nn.softmax(logits)
-            ent_ps = -jnp.sum(p * jax.nn.log_softmax(logits), axis=-1)
-            ent = jnp.sum(ent_ps * gate_active) / (jnp.sum(gate_active) + 1e-8)
-        return logp, ent
+            gate_logp = jnp.sum(jax.nn.log_softmax(logits) * onehot, axis=-1)
+            ent_ps = -jnp.sum(jax.nn.softmax(logits) * jax.nn.log_softmax(logits), axis=-1)
+        else:
+            gate_logp = jnp.zeros_like(res_logp)
+            ent_ps = jnp.zeros_like(res_logp)
+        return res_logp, gate_logp, ent_ps
 
     @jax.jit
     def collect(params, env_state, key):
@@ -427,10 +429,16 @@ def main(args):
         obs_b = jnp.where(valid[:, None], obs_b, 0.0)
         raw_b = jnp.where(valid[:, None], raw_b, 0.0)
         adv_b = jnp.where(valid, adv_b, 0.0)
+        gw = ga_b * w  # valid AND a gate-decision step
 
         def loss_fn(p):
-            logp, ent = policy_logprob(p, obs_b, onehot_b, raw_b, ga_b)
-            pg = -jnp.sum(logp * adv_b * w) / (jnp.sum(w) + 1e-6)  # masked mean
+            res_logp, gate_logp, ent_ps = policy_logprob(p, obs_b, onehot_b, raw_b)
+            pg_res = -jnp.sum(res_logp * adv_b * w) / (jnp.sum(w) + 1e-6)
+            # Gate term normalized by the gate-active count -> the sparse selection signal
+            # gets its full weight instead of being diluted by committed non-decisions.
+            pg_gate = -jnp.sum(gate_logp * adv_b * gw) / (jnp.sum(gw) + 1e-6)
+            ent = jnp.sum(ent_ps * gw) / (jnp.sum(gw) + 1e-6)
+            pg = pg_res + pg_gate
             return pg - args.gate_entropy_coef * ent, (pg, ent)
         (loss, (pg, ent)), grad = jax.value_and_grad(loss_fn, has_aux=True)(comp_state.params)
         comp_state = comp_state.apply_gradients(grads=grad)
